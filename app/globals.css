@@ -1,0 +1,382 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;800&family=Inter:wght@300;400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gradient-to-br from-blue-50 to-purple-50 font-inter;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-sora font-bold;
+  }
+
+  p, span, button {
+    @apply font-inter;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply px-8 py-4 bg-gradient-to-r from-blue-600 to-teal-500 text-white font-bold rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 font-sora;
+  }
+  
+  .btn-secondary {
+    @apply px-6 py-3 bg-white text-blue-600 font-semibold rounded-full border-2 border-blue-300 hover:bg-blue-50 transform hover:scale-105 transition-all duration-300 font-sora;
+  }
+
+  .card {
+    @apply bg-white rounded-2xl shadow-lg p-6 hover:shadow-xl transition-shadow duration-300;
+  }
+
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-md rounded-2xl shadow-lg p-6 border border-white/20;
+  }
+}
+
+.cash-title {
+  position: relative;
+  display: inline-block;
+  line-height: 1;
+  --cash-cycle: 2.6s;
+}
+
+.cash-shine-text {
+  position: relative;
+  display: inline-block;
+  color: #f7f7ff;
+  filter: drop-shadow(0 8px 22px rgba(255, 255, 255, 0.65));
+}
+
+.cash-shine-text::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 244, 170, 0.45) 34%,
+    rgba(255, 255, 255, 1) 50%,
+    rgba(255, 255, 255, 1) 54%,
+    rgba(255, 244, 170, 0.45) 66%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 44% 100%;
+  background-repeat: no-repeat;
+  background-position: -40% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: cash-shine-sweep var(--cash-cycle) linear infinite;
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.9));
+}
+
+.cash-spark {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  font-size: 0.28em;
+  transform: translate(-45%, -50%);
+  opacity: 1;
+  color: #fff8b8;
+  text-shadow: 0 0 8px rgba(255, 248, 184, 0.85), 0 0 16px rgba(255, 255, 255, 0.8);
+  animation: cash-spark-travel var(--cash-cycle) linear infinite, cash-spark-flash var(--cash-cycle) linear infinite;
+}
+
+@keyframes cash-shine-sweep {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
+}
+
+@keyframes cash-spark-travel {
+  from {
+    left: 0%;
+    transform: translate(-45%, -50%) scale(1);
+  }
+  to {
+    left: 100%;
+    transform: translate(-55%, -50%) scale(1);
+  }
+}
+
+@keyframes cash-spark-flash {
+  0%, 92% {
+    text-shadow: 0 0 8px rgba(255, 248, 184, 0.85), 0 0 16px rgba(255, 255, 255, 0.8);
+  }
+  96%, 100% {
+    text-shadow: 0 0 14px rgba(255, 248, 184, 1), 0 0 28px rgba(255, 255, 255, 1), 0 0 44px rgba(255, 255, 255, 0.9);
+  }
+}
+
+/* ===========================
+   BASE PUPPY CSS
+   =========================== */
+:root {
+  --fur-color: #e8c39e;
+  --fur-dark: #cfa680;
+  --ear-color: #8c6a4a;
+}
+
+.puppy-container {
+  position: relative;
+  width: 180px;
+  height: 160px;
+  margin: auto;
+}
+
+/* Head */
+.head {
+  position: absolute;
+  top: 30px;
+  left: 15px;
+  width: 150px;
+  height: 130px;
+  background-color: var(--fur-color);
+  border-radius: 50% 50% 45% 45% / 60% 60% 40% 40%;
+  z-index: 2;
+  transition: all 0.3s ease;
+}
+
+/* Ears */
+.ear {
+  position: absolute;
+  top: 20px;
+  width: 50px;
+  height: 90px;
+  background-color: var(--ear-color);
+  border-radius: 50%;
+  z-index: 1;
+  transition: all 0.3s ease;
+}
+.ear.left { left: 0; transform: rotate(-20deg); }
+.ear.right { right: 0; transform: rotate(20deg); }
+
+/* Face Features Container */
+.face {
+  position: relative;
+  top: 50px;
+  height: 80px;
+}
+
+/* Eyes */
+.eyes-container {
+  display: flex;
+  justify-content: center;
+  gap: 35px;
+}
+.eye {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  background: #222;
+  border-radius: 50%;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+/* Eye shine */
+.eye::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 6px;
+  height: 6px;
+  background: white;
+  border-radius: 50%;
+}
+
+/* Nose */
+.nose {
+  position: absolute;
+  top: 25px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 14px;
+  background: #333;
+  border-radius: 50% 50% 60% 60%;
+}
+
+/* Mouth - Default is Happy */
+.mouth {
+  position: absolute;
+  top: 35px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 30px;
+  height: 15px;
+  border-bottom: 3px solid #333;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+/* Cheeks */
+.cheeks-container {
+   position: absolute;
+   top: 30px;
+   width: 100%;
+   display: flex;
+   justify-content: space-between;
+   padding: 0 20px;
+   box-sizing: border-box;
+}
+.cheek {
+  width: 20px;
+  height: 12px;
+  background: #ffb6c1;
+  opacity: 0.6;
+  border-radius: 50%;
+}
+
+/* ===========================
+   REACTION MODIFIERS
+   =========================== */
+
+/* --- HAPPY (Default + enhancements) --- */
+.puppy-container.happy .mouth {
+  height: 20px;
+  width: 34px;
+}
+.puppy-container.happy .cheek {
+  opacity: 0.8;
+}
+
+/* --- SAD --- */
+.puppy-container.sad .ear.left { transform: rotate(-5deg) translateY(10px); }
+.puppy-container.sad .ear.right { transform: rotate(5deg) translateY(10px); }
+.puppy-container.sad .mouth {
+  top: 45px;
+  border-bottom: none;
+  border-top: 3px solid #333; /* Frown */
+}
+.puppy-container.sad .eye {
+  height: 14px; /* Droopy eyes */
+  transform: translateY(2px);
+}
+.puppy-container.sad .cheek { opacity: 0; }
+
+/* --- EXCITED --- */
+.puppy-container.excited .head {
+  animation: puppy-bounce 0.4s infinite alternate;
+}
+.puppy-container.excited .ear.left { transform: rotate(-40deg) translateY(-10px); }
+.puppy-container.excited .ear.right { transform: rotate(40deg) translateY(-10px); }
+.puppy-container.excited .eye {
+  width: 22px;
+  height: 22px; /* Big eyes */
+}
+.puppy-container.excited .eye::after {
+  width: 8px; height: 8px; /* Big shine */
+}
+/* Open mouth */
+.puppy-container.excited .mouth {
+  height: 25px;
+  width: 30px;
+  background: #7a2e2e;
+  border: none;
+  border-radius: 50%;
+  overflow: hidden;
+}
+/* Tongue */
+.puppy-container.excited .mouth::after {
+  content: '';
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 18px;
+  height: 15px;
+  background: #ff6b6b;
+  border-radius: 50%;
+}
+@keyframes puppy-bounce {
+  from { transform: translateY(0); }
+  to { transform: translateY(-5px); }
+}
+
+/* --- CONCERNED (like sick but not as green) --- */
+.puppy-container.concerned {
+  --fur-color: #e8d39e; /* Slightly muted */
+  --ear-color: #8c7a4a;
+}
+.puppy-container.concerned .eye {
+  height: 6px; /* Squinted eyes */
+  border-radius: 2px;
+  transform: translateY(6px);
+}
+.puppy-container.concerned .eye::after { content: none; } /* No shine */
+.puppy-container.concerned .mouth {
+  width: 15px;
+  height: 4px;
+  border-bottom: 2px solid #333;
+  border-radius: 0;
+  top: 45px;
+}
+.puppy-container.concerned .cheek {
+  background: #ffb6c1;
+  opacity: 0.4;
+}
+
+/* --- SLEEPY --- */
+.puppy-container.sleepy .ear.left { transform: rotate(-15deg) translateY(5px); }
+.puppy-container.sleepy .ear.right { transform: rotate(15deg) translateY(5px); }
+.puppy-container.sleepy .eye {
+  height: 3px; /* Closed/sleepy eyes */
+  border-radius: 2px;
+  transform: translateY(8px);
+}
+.puppy-container.sleepy .eye::after { content: none; }
+.puppy-container.sleepy .mouth {
+  width: 20px;
+  height: 8px;
+  border-bottom: none;
+  border-top: none;
+  background: #333;
+  border-radius: 0;
+  top: 45px;
+}
+.puppy-container.sleepy .cheek {
+  opacity: 0.4;
+}
+.puppy-container.sleepy .head {
+  animation: sleepy-nod 2s infinite;
+}
+@keyframes sleepy-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-2deg); }
+}
+
+/* Puppy Companion Animations */
+@keyframes bounce-slow {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-bounce-slow {
+  animation: bounce-slow 3s ease-in-out infinite;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.5s ease-out;
+}
+
+.puppy-widget {
+  animation: bounce-slow 4s ease-in-out infinite;
+}
