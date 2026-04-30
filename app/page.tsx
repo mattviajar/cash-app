@@ -26,24 +26,24 @@ export default function WelcomePage() {
       {/* Content */}
       <div className="relative z-10 min-h-screen flex flex-col items-center justify-center px-4">
         {/* Title */}
-        <div className="text-center mb-12">
-          <h1 className="cash-title text-8xl md:text-9xl font-sora font-black mb-2 tracking-tight">
+        <div className="text-center mb-6 sm:mb-12">
+          <h1 className="cash-title text-6xl sm:text-8xl md:text-9xl font-sora font-black mb-2 tracking-tight">
             <span className="cash-shine-text" data-text="C.A.S.H.">C.A.S.H.</span>
             <span className="cash-spark" aria-hidden="true">✦</span>
           </h1>
           <div className="h-1 w-32 mx-auto bg-gradient-to-r from-blue-300 via-teal-300 to-cyan-200 rounded-full mb-6"></div>
-          <p className="text-2xl md:text-3xl text-white/95 font-sora font-semibold drop-shadow-lg tracking-wide">
+          <p className="text-lg sm:text-2xl md:text-3xl text-white/95 font-sora font-semibold drop-shadow-lg tracking-wide">
             Learn • Save • Achieve
           </p>
         </div>
 
         {/* Glass Card Container */}
-        <div className="glass-card max-w-md w-full text-center space-y-6">
+        <div className="glass-card max-w-md w-full text-center space-y-4">
           <div className="space-y-3">
-            <h2 className="text-4xl font-sora font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500">
+            <h2 className="text-2xl sm:text-4xl font-sora font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500">
               Welcome!
             </h2>
-            <p className="text-gray-700 text-lg font-inter font-medium leading-relaxed">
+            <p className="text-gray-700 text-sm sm:text-lg font-inter font-medium leading-relaxed">
               Your adventure to becoming a savings superstar starts here! 🌟
             </p>
           </div>
@@ -51,34 +51,34 @@ export default function WelcomePage() {
           {/* Enter Button */}
           <button
             onClick={() => router.push('/login')}
-            className="btn-primary w-full text-2xl py-6 group relative overflow-hidden"
+            className="btn-primary w-full text-base sm:text-2xl py-3 sm:py-6 group relative overflow-hidden"
           >
             <span className="relative z-10 flex items-center justify-center gap-3 font-sora font-semibold">
               Let's Go! 
-              <span className="text-3xl group-hover:translate-x-2 transition-transform duration-300">🚀</span>
+              <span className="text-xl sm:text-3xl group-hover:translate-x-2 transition-transform duration-300">🚀</span>
             </span>
             <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-teal-500 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
           </button>
 
           {/* Fun Stats Preview */}
-          <div className="grid grid-cols-3 gap-4 pt-6 border-t border-teal-200">
+          <div className="grid grid-cols-3 gap-2 pt-4 border-t border-teal-200">
             <div className="text-center">
-              <div className="text-3xl mb-1">🎯</div>
-              <div className="text-sm text-gray-700 font-inter font-semibold">Set Goals</div>
+              <div className="text-2xl sm:text-3xl mb-1">🎯</div>
+              <div className="text-xs sm:text-sm text-gray-700 font-inter font-semibold">Set Goals</div>
             </div>
             <div className="text-center">
-              <div className="text-3xl mb-1">📊</div>
-              <div className="text-sm text-gray-700 font-inter font-semibold">Track Progress</div>
+              <div className="text-2xl sm:text-3xl mb-1">📊</div>
+              <div className="text-xs sm:text-sm text-gray-700 font-inter font-semibold">Track Progress</div>
             </div>
             <div className="text-center">
-              <div className="text-3xl mb-1">🏆</div>
-              <div className="text-sm text-gray-700 font-inter font-semibold">Earn Rewards</div>
+              <div className="text-2xl sm:text-3xl mb-1">🏆</div>
+              <div className="text-xs sm:text-sm text-gray-700 font-inter font-semibold">Earn Rewards</div>
             </div>
           </div>
         </div>
 
         {/* Footer Text */}
-        <p className="mt-12 text-white/90 text-center max-w-2xl px-4 text-lg font-inter font-medium drop-shadow-lg leading-relaxed">
+        <p className="mt-6 text-white/90 text-center max-w-2xl px-4 text-sm sm:text-lg font-inter font-medium drop-shadow-lg leading-relaxed">
           Parents and kids working together to build healthy money habits! 💪
         </p>
 

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Optocoupler Wiring Guide - CASH</title>
+<style>
+  body { margin: 0; background: #f8fafc; font-family: Consolas, "Courier New", monospace; display: flex; flex-direction: column; align-items: center; padding: 30px; }
+  h1 { font-size: 20px; color: #0f172a; margin-bottom: 4px; }
+  p.sub { font-size: 13px; color: #64748b; margin-bottom: 28px; }
+  svg { background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 10px; box-shadow: 0 2px 12px #0001; }
+
+  /* wire colors */
+  .wire-red    { stroke: #dc2626; fill: none; stroke-width: 3; }
+  .wire-blue   { stroke: #2563eb; fill: none; stroke-width: 3; }
+  .wire-purple { stroke: #7c3aed; fill: none; stroke-width: 3; }
+  .wire-orange { stroke: #ea580c; fill: none; stroke-width: 3; }
+  .wire-yellow { stroke: #b59a00; fill: none; stroke-width: 2.5; stroke-dasharray: 5,3; }
+  .wire-black  { stroke: #111827; fill: none; stroke-width: 2.5; }
+  .wire-green  { stroke: #16a34a; fill: none; stroke-width: 3; }
+  .wire-signal { stroke: #0f5eb0; fill: none; stroke-width: 2.5; stroke-dasharray: 6,3; }
+
+  .box    { fill: #f1f5f9; stroke: #334155; stroke-width: 1.5; }
+  .boxred { fill: #fff1f2; stroke: #dc2626; stroke-width: 1.5; }
+  .boxchip{ fill: #e0f2fe; stroke: #0369a1; stroke-width: 1.5; }
+  .boxesp { fill: #f0fdf4; stroke: #15803d; stroke-width: 1.5; }
+  .boxpwr { fill: #fefce8; stroke: #a16207; stroke-width: 1.5; }
+
+  .t  { fill: #0f172a; font-size: 15px; font-weight: 700; }
+  .sm { fill: #334155; font-size: 13px; }
+  .xs { fill: #64748b; font-size: 12px; }
+  .lbl-red    { fill: #dc2626; font-size: 13px; font-weight: 700; }
+  .lbl-blue   { fill: #2563eb; font-size: 13px; font-weight: 700; }
+  .lbl-purple { fill: #7c3aed; font-size: 13px; font-weight: 700; }
+  .lbl-orange { fill: #ea580c; font-size: 13px; font-weight: 700; }
+  .lbl-green  { fill: #16a34a; font-size: 13px; font-weight: 700; }
+  .warn { fill: #991b1b; font-size: 13px; font-weight: 700; }
+  .note { fill: #1e40af; font-size: 12px; }
+  .dot  { fill: #0f5eb0; }
+</style>
+</head>
+<body>
+<h1>Optocoupler Wiring - Clean Schematic Layout</h1>
+<p class="sub">Spaced layout with standard symbols and explicit terminal-to-terminal routing.</p>
+
+<svg width="1380" height="820" viewBox="0 0 1380 820">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 z" fill="#334155" />
+    </marker>
+  </defs>
+
+  <text x="690" y="44" class="t" text-anchor="middle">TB74 CONTACT OUTPUT (BLUE/PURPLE) -> 817 INPUT (IN/G) -> 817 OUTPUT (V/G) -> RC FILTER -> ESP32 GPIO34</text>
+
+  <!-- power rails, isolated and spaced -->
+  <line x1="40" y1="84" x2="420" y2="84" class="wire-red" />
+  <text x="44" y="76" class="lbl-red">+12V rail (to TB74 RED)</text>
+  <line x1="40" y1="118" x2="1330" y2="118" class="wire-black" />
+  <text x="44" y="110" class="sm">GND rail (TB74 ORANGE, 817 OUT G, ESP32 GND)</text>
+
+  <!-- TB74 as terminal strip only -->
+  <text x="80" y="190" class="t">TB74</text>
+  <text x="80" y="212" class="sm">Output contacts</text>
+  <circle cx="170" cy="236" r="5" class="dot" />
+  <circle cx="170" cy="286" r="5" class="dot" />
+  <text x="90" y="240" class="lbl-blue">BLUE</text>
+  <text x="80" y="290" class="lbl-purple">PURPLE</text>
+
+  <!-- contact symbol (NO style) -->
+  <line x1="182" y1="236" x2="214" y2="236" class="wire-blue" />
+  <line x1="182" y1="286" x2="214" y2="286" class="wire-purple" />
+  <line x1="214" y1="236" x2="248" y2="258" stroke="#334155" stroke-width="2" />
+  <line x1="214" y1="286" x2="248" y2="286" stroke="#334155" stroke-width="2" />
+  <text x="214" y="312" class="xs">TB74 contact pair</text>
+
+  <!-- 817 input terminals -->
+  <text x="430" y="190" class="t">817 INPUT SIDE</text>
+  <circle cx="470" cy="236" r="5" class="dot" />
+  <circle cx="470" cy="286" r="5" class="dot" />
+  <text x="484" y="240" class="lbl-blue">IN</text>
+  <text x="484" y="290" class="lbl-purple">G</text>
+
+  <!-- left routing, fully separated -->
+  <line x1="248" y1="258" x2="370" y2="258" class="wire-blue" />
+  <line x1="370" y1="258" x2="370" y2="236" class="wire-blue" />
+  <line x1="370" y1="236" x2="470" y2="236" class="wire-blue" marker-end="url(#arrow)" />
+
+  <line x1="248" y1="286" x2="470" y2="286" class="wire-purple" marker-end="url(#arrow)" />
+
+  <!-- optocoupler symbol centered with spacing -->
+  <rect x="560" y="178" width="230" height="170" rx="8" fill="none" stroke="#0369a1" stroke-width="1.6" />
+  <text x="675" y="202" class="t" text-anchor="middle">OPTOCOUPLER</text>
+  <text x="675" y="220" class="sm" text-anchor="middle">PC817 / 817 module channel</text>
+
+  <!-- internal LED -->
+  <line x1="590" y1="236" x2="620" y2="236" class="wire-blue" />
+  <line x1="590" y1="286" x2="620" y2="286" class="wire-purple" />
+  <polygon points="620,228 636,260 604,260" fill="none" stroke="#2563eb" stroke-width="1.8" />
+  <line x1="604" y1="270" x2="636" y2="270" stroke="#2563eb" stroke-width="1.8" />
+  <text x="586" y="312" class="xs">Input LED</text>
+
+  <!-- isolation barrier -->
+  <line x1="676" y1="230" x2="676" y2="320" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,4" />
+  <text x="676" y="338" class="xs" text-anchor="middle">Isolation</text>
+
+  <!-- transistor -->
+  <line x1="716" y1="236" x2="748" y2="236" class="wire-signal" />
+  <line x1="732" y1="236" x2="732" y2="286" class="wire-signal" />
+  <line x1="748" y1="286" x2="716" y2="286" class="wire-black" />
+  <text x="714" y="312" class="xs">Output transistor</text>
+
+  <!-- 817 output terminals, physically separated from box -->
+  <text x="860" y="190" class="t">817 OUTPUT SIDE</text>
+  <circle cx="900" cy="236" r="5" class="dot" />
+  <circle cx="900" cy="286" r="5" class="dot" />
+  <text x="914" y="240" class="lbl-green">V</text>
+  <text x="914" y="290" class="sm">G</text>
+
+  <line x1="790" y1="236" x2="900" y2="236" class="wire-green" marker-end="url(#arrow)" />
+  <line x1="790" y1="286" x2="900" y2="286" class="wire-black" marker-end="url(#arrow)" />
+
+  <!-- RC and node area with lots of whitespace -->
+  <text x="1020" y="190" class="t">RC NODE</text>
+  <circle cx="1040" cy="236" r="6" class="dot" />
+  <text x="1052" y="240" class="sm">SIG_NODE</text>
+  <line x1="900" y1="236" x2="1040" y2="236" class="wire-signal" marker-end="url(#arrow)" />
+
+  <!-- resistor to 3.3 -->
+  <line x1="1040" y1="236" x2="1040" y2="210" class="wire-yellow" />
+  <polyline points="1040,210 1030,202 1050,194 1030,186 1050,178 1030,170 1050,162 1040,154" fill="none" stroke="#a16207" stroke-width="2" />
+  <line x1="1040" y1="154" x2="1040" y2="140" class="wire-yellow" />
+  <line x1="1014" y1="140" x2="1066" y2="140" class="wire-yellow" />
+  <text x="1072" y="144" class="sm">+3.3V</text>
+  <text x="1072" y="178" class="xs">R1 10k</text>
+
+  <!-- capacitor to gnd -->
+  <line x1="1040" y1="236" x2="1040" y2="266" class="wire-black" />
+  <line x1="1026" y1="266" x2="1054" y2="266" class="wire-black" />
+  <line x1="1026" y1="276" x2="1054" y2="276" class="wire-black" />
+  <line x1="1040" y1="276" x2="1040" y2="302" class="wire-black" />
+  <line x1="1022" y1="302" x2="1058" y2="302" class="wire-black" />
+  <line x1="1026" y1="310" x2="1054" y2="310" class="wire-black" />
+  <line x1="1030" y1="318" x2="1050" y2="318" class="wire-black" />
+  <text x="1072" y="274" class="xs">C1 100nF</text>
+
+  <!-- GND return from output terminal -->
+  <line x1="900" y1="286" x2="980" y2="286" class="wire-black" />
+  <line x1="980" y1="286" x2="980" y2="118" class="wire-black" />
+
+  <!-- ESP32 minimal block -->
+  <rect x="1160" y="202" width="170" height="96" rx="8" fill="none" stroke="#15803d" stroke-width="1.6" />
+  <text x="1245" y="228" class="t" text-anchor="middle">ESP32</text>
+  <text x="1172" y="252" class="sm">GPIO34 <- SIG_NODE</text>
+  <text x="1172" y="272" class="sm">GND <- common GND</text>
+  <line x1="1040" y1="236" x2="1160" y2="236" class="wire-signal" marker-end="url(#arrow)" />
+
+  <!-- mapping section, no heavy boxes -->
+  <line x1="40" y1="382" x2="1330" y2="382" stroke="#cbd5e1" stroke-width="1.2" />
+  <text x="50" y="414" class="t">Exact Wiring (channel row must match on IN/G and V/G)</text>
+  <text x="50" y="446" class="sm">1) BLUE wire -> 817 IN terminal (input side).</text>
+  <text x="50" y="472" class="sm">2) PURPLE wire -> 817 G terminal (input side).</text>
+  <text x="50" y="498" class="sm">3) 817 V terminal (output side) -> SIG_NODE -> ESP32 GPIO34.</text>
+  <text x="50" y="524" class="sm">4) 817 G terminal (output side) -> common GND rail.</text>
+  <text x="50" y="550" class="sm">5) R1 10k from SIG_NODE to +3.3V, C1 100nF from SIG_NODE to GND.</text>
+  <text x="50" y="582" class="warn">If no pulse is detected: verify same channel row first, then swap BLUE and PURPLE once.</text>
+</svg>
+</body>
+</html>

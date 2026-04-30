@@ -6,6 +6,7 @@ import Link from 'next/link'
 
 type Role = 'kid' | 'parent'
 type MenuKey = 'dashboard' | 'goals' | 'transactions' | 'statistics' | 'settings' | 'profile'
+type HistoryKind = 'withdrawal' | 'hardware'
 
 type WithdrawalRecord = {
   id: number
@@ -13,6 +14,7 @@ type WithdrawalRecord = {
   amount: number
   note: string
   when: string
+  kind?: HistoryKind
 }
 
 type PendingWithdrawal = {
@@ -81,6 +83,29 @@ function safeParse<T>(raw: string | null, fallback: T): T {
   }
 }
 
+const PHP_CURRENCY = new Intl.NumberFormat('en-PH', {
+  style: 'currency',
+  currency: 'PHP',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+function formatPHP(value: number): string {
+  return PHP_CURRENCY.format(Number.isFinite(value) ? value : 0)
+}
+
+function getSignedTransactionAmount(item: WithdrawalRecord): number {
+  if (item.kind === 'hardware') {
+    return item.amount
+  }
+  return -Math.abs(item.amount)
+}
+
+function formatSignedPHP(value: number): string {
+  const sign = value >= 0 ? '+' : '-'
+  return `${sign}${formatPHP(Math.abs(value))}`
+}
+
 export default function DashboardPage() {
   const router = useRouter()
   const [role, setRole] = useState<Role>('kid')
@@ -110,6 +135,9 @@ export default function DashboardPage() {
   const [newKidSecurityAnswer, setNewKidSecurityAnswer] = useState('')
   const [newKidCustomQuestion, setNewKidCustomQuestion] = useState('')
   const [isHydrated, setIsHydrated] = useState(false)
+  const [depositToast, setDepositToast] = useState<string | null>(null)
+  const [lastHardwareDepositAt, setLastHardwareDepositAt] = useState<string | null>(null)
+  const [lastHardwareDepositAmount, setLastHardwareDepositAmount] = useState<number | null>(null)
 
   const kidGoals = useMemo(() => {
     if (!kidName) return initialKidGoals
@@ -256,6 +284,83 @@ export default function DashboardPage() {
     }
   }, [role, activeMenu])
 
+  useEffect(() => {
+    if (!isHydrated) return
+
+    const controller = new AbortController()
+    const publishDeviceStatus = async () => {
+      try {
+        await fetch('/api/device/status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            loggedIn: role === 'kid' && kidName.length > 0,
+            name: role === 'kid' ? kidName : '',
+            balance: role === 'kid' ? balance : 0,
+          }),
+          signal: controller.signal,
+        })
+      } catch {
+        // Ignore sync failures so the dashboard keeps working offline.
+      }
+    }
+
+    void publishDeviceStatus()
+    return () => controller.abort()
+  }, [isHydrated, role, kidName, balance])
+
+  // Poll the deposit API every 2 seconds for the active kid dashboard only.
+  // This avoids other tabs/sessions consuming and discarding hardware deposits.
+  useEffect(() => {
+    if (!isHydrated || role !== 'kid' || !kidName) return
+
+    let cancelled = false
+    const pollDeposits = async () => {
+      try {
+        const res = await fetch('/api/deposit?consume=true', { cache: 'no-store' })
+        if (!res.ok) return
+        const data = await res.json() as { deposits: { id: number; amount: number }[] }
+        if (!data.deposits || data.deposits.length === 0) return
+        const total = Math.round(data.deposits.reduce((sum, d) => sum + d.amount, 0) * 100) / 100
+        if (cancelled) return
+
+        const hardwareEvents: WithdrawalRecord[] = data.deposits.map((d, index) => ({
+          id: Date.now() + index,
+          child: kidName,
+          amount: Math.round(d.amount * 100) / 100,
+          note: d.amount >= 0 ? 'Hardware deposit' : 'Hardware deduction',
+          when: 'Just now',
+          kind: 'hardware',
+        }))
+
+        setBalance((prev) => Math.round((prev + total) * 100) / 100)
+        setHistory((prev) => [...hardwareEvents.reverse(), ...prev])
+        setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
+        setLastHardwareDepositAmount(total)
+        setDepositToast(
+          total >= 0
+            ? `+${formatPHP(total)} deposited!`
+            : `${formatPHP(total)} deducted!`
+        )
+        setTimeout(() => setDepositToast(null), 4000)
+      } catch {
+        // Silently ignore network errors (e.g. server not running)
+      }
+    }
+
+    void pollDeposits()
+    const interval = setInterval(() => {
+      void pollDeposits()
+    }, 2000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isHydrated, role, kidName])
+
   const visibleMenuItems = role === 'kid' ? menuItems.filter((item) => item.key !== 'settings') : menuItems
 
   const canWithdraw = useMemo(() => {
@@ -272,22 +377,32 @@ export default function DashboardPage() {
 
   const kidHistory = history.filter((entry) => entry.child === kidName)
   const pendingForKid = pendingWithdrawals.filter((entry) => entry.child === kidName)
+  const kidHistorySigned = kidHistory.map((item) => ({
+    ...item,
+    signedAmount: getSignedTransactionAmount(item),
+  }))
   const totalGoalSaved = kidGoals.reduce((sum, goal) => sum + goal.saved, 0)
   const totalGoalTarget = kidGoals.reduce((sum, goal) => sum + goal.target, 0)
   const totalGoalProgress = totalGoalTarget > 0 ? Math.round((totalGoalSaved / totalGoalTarget) * 100) : 0
   const topGoal = (kidGoals.length > 0 ? [...kidGoals].sort((a, b) => b.saved / b.target - a.saved / a.target)[0] : null)
-  const totalKidSpent = kidHistory.reduce((sum, item) => sum + item.amount, 0)
-  const kidAverageWithdrawal = kidHistory.length > 0 ? totalKidSpent / kidHistory.length : 0
-  const kidLargestWithdrawal = kidHistory.length > 0 ? Math.max(...kidHistory.map((item) => item.amount)) : 0
+  const outgoingKidTransactions = kidHistorySigned.filter((item) => item.signedAmount < 0)
+  const totalKidSpent = outgoingKidTransactions.reduce((sum, item) => sum + Math.abs(item.signedAmount), 0)
+  const kidAverageWithdrawal = outgoingKidTransactions.length > 0 ? totalKidSpent / outgoingKidTransactions.length : 0
+  const kidLargestWithdrawal = outgoingKidTransactions.length > 0
+    ? Math.max(...outgoingKidTransactions.map((item) => Math.abs(item.signedAmount)))
+    : 0
   const kidApprovalRate = kidHistory.length + pendingForKid.length > 0
     ? Math.round((kidHistory.length / (kidHistory.length + pendingForKid.length)) * 100)
     : 100
   const selectedCharacter = characterOptions.find((option) => option.id === kidCharacter) ?? characterOptions[0]
   
   const kidSpendingByNote = Object.entries(
-    kidHistory.reduce<Record<string, number>>((acc, item) => {
+    kidHistorySigned.reduce<Record<string, number>>((acc, item) => {
+      if (item.signedAmount >= 0) {
+        return acc
+      }
       const key = item.note.trim() || 'Other'
-      acc[key] = (acc[key] ?? 0) + item.amount
+      acc[key] = (acc[key] ?? 0) + Math.abs(item.signedAmount)
       return acc
     }, {})
   ).slice(0, 5)
@@ -300,8 +415,18 @@ export default function DashboardPage() {
   }))
   const parentSpendingByChild = parentChildren.map((child) => ({
     name: child.name,
-    amount: history.filter((entry) => entry.child === child.name).reduce((sum, entry) => sum + entry.amount, 0),
+    amount: history
+      .filter((entry) => entry.child === child.name)
+      .reduce((sum, entry) => {
+        const signed = getSignedTransactionAmount(entry)
+        return signed < 0 ? sum + Math.abs(signed) : sum
+      }, 0),
   }))
+  const outgoingHistory = history.filter((entry) => getSignedTransactionAmount(entry) < 0)
+  const totalOutgoingHistoryAmount = outgoingHistory.reduce(
+    (sum, entry) => sum + Math.abs(getSignedTransactionAmount(entry)),
+    0
+  )
   const parentGoals = validKidAccounts.flatMap((username) =>
     (kidGoalsByAccount[username] ?? []).map((goal) => ({
       ...goal,
@@ -347,6 +472,7 @@ export default function DashboardPage() {
           amount,
           note,
           when: instantWithdrawals ? 'Just now' : 'Auto-approved now',
+          kind: 'withdrawal',
         },
         ...prev,
       ])
@@ -383,6 +509,7 @@ export default function DashboardPage() {
         amount: request.amount,
         note: request.note,
         when: 'Approved now',
+        kind: 'withdrawal',
       },
       ...prev,
     ])
@@ -417,32 +544,38 @@ export default function DashboardPage() {
   }
 
   const kidDashboardView = (
-    <section className="space-y-6">
+    <section className="space-y-3 sm:space-y-6">
       {kidName && (
         <div className="glass-card bg-gradient-to-r from-blue-500/10 to-teal-500/10">
-          <h2 className="text-3xl font-sora font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500">
+          <h2 className="text-lg sm:text-3xl font-sora font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500">
             Welcome back, {kidName}! 👋
           </h2>
         </div>
       )}
       
       <div className="glass-card">
-        <p className="text-gray-700 font-inter font-semibold">Current Balance</p>
-        <h2 className="text-5xl font-sora font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500 mt-2">
-          {kidShowBalance ? `$${balance.toFixed(2)}` : '•••••'}
+        <p className="text-gray-700 font-inter font-semibold text-sm sm:text-base">Current Balance</p>
+        <h2 className="text-2xl sm:text-5xl font-sora font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500 mt-1 break-words">
+          {kidShowBalance ? formatPHP(balance) : '•••••'}
         </h2>
         <p className="text-gray-600 font-inter mt-2">Deposits are handled by the machine automatically.</p>
+        <p className="text-xs text-gray-600 font-inter mt-2">
+          Hardware deposit status:{' '}
+          {lastHardwareDepositAt && lastHardwareDepositAmount !== null
+            ? `Last received ${formatPHP(lastHardwareDepositAmount)} at ${lastHardwareDepositAt}`
+            : 'Waiting for first hardware event'}
+        </p>
       </div>
 
-      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
         <button
           type="button"
           onClick={() => setActiveMenu('goals')}
           className="glass-card text-left hover:scale-[1.01] transition-transform"
         >
-          <p className="text-sm text-gray-600 font-inter">Goals Snapshot</p>
-          <p className="text-3xl font-sora font-black text-blue-700 mt-2">{totalGoalProgress}%</p>
-          <p className="text-sm text-gray-700 font-inter mt-1">Overall progress</p>
+          <p className="text-xs text-gray-600 font-inter">Goals Snapshot</p>
+          <p className="text-xl sm:text-3xl font-sora font-black text-blue-700 mt-1">{totalGoalProgress}%</p>
+          <p className="text-xs text-gray-700 font-inter mt-0.5">Overall progress</p>
         </button>
 
         <button
@@ -460,9 +593,9 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('statistics')}
           className="glass-card text-left hover:scale-[1.01] transition-transform"
         >
-          <p className="text-sm text-gray-600 font-inter">Spent Total</p>
-          <p className="text-3xl font-sora font-black text-blue-700 mt-2">${totalKidSpent.toFixed(2)}</p>
-          <p className="text-sm text-gray-700 font-inter mt-1">All withdrawals</p>
+          <p className="text-xs text-gray-600 font-inter">Spent Total</p>
+          <p className="text-xl sm:text-3xl font-sora font-black text-blue-700 mt-1">{formatPHP(totalKidSpent)}</p>
+          <p className="text-xs text-gray-700 font-inter mt-0.5">All withdrawals</p>
         </button>
 
         <button
@@ -470,17 +603,17 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('profile')}
           className="glass-card text-left hover:scale-[1.01] transition-transform"
         >
-          <p className="text-sm text-gray-600 font-inter">Character Profile</p>
-          <p className="text-xl font-sora font-black text-blue-700 mt-2">
+          <p className="text-xs text-gray-600 font-inter">Character Profile</p>
+          <p className="text-base sm:text-xl font-sora font-black text-blue-700 mt-1">
             {selectedCharacter.emoji} {selectedCharacter.title}
           </p>
-          <p className="text-sm text-gray-700 font-inter mt-1">Customize your avatar</p>
+          <p className="text-xs text-gray-700 font-inter mt-0.5">Customize your avatar</p>
         </button>
       </div>
 
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Withdraw</h3>
-        <form onSubmit={handleWithdraw} className="grid gap-4 md:grid-cols-3">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Withdraw</h3>
+        <form onSubmit={handleWithdraw} className="grid gap-2 sm:gap-4 md:grid-cols-3">
           <input
             type="number"
             min="0"
@@ -488,14 +621,14 @@ export default function DashboardPage() {
             value={withdrawAmount}
             onChange={(e) => setWithdrawAmount(e.target.value)}
             placeholder="Amount"
-            className="px-4 py-3 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80"
+            className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
           />
           <input
             type="text"
             value={withdrawNote}
             onChange={(e) => setWithdrawNote(e.target.value)}
             placeholder="Reason (optional)"
-            className="px-4 py-3 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80"
+            className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
           />
           <button
             type="submit"
@@ -517,7 +650,7 @@ export default function DashboardPage() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-3">Goal Highlight</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Goal Highlight</h3>
           <p className="text-gray-700 font-inter font-semibold">{topGoal ? topGoal.name : 'No goals yet'}</p>
           <p className="text-sm text-gray-600 font-inter mt-1">Best progress so far</p>
           <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-3">
@@ -526,13 +659,13 @@ export default function DashboardPage() {
               style={{ width: `${topGoal ? Math.round((topGoal.saved / topGoal.target) * 100) : 0}%` }}
             ></div>
           </div>
-          <p className="text-sm text-gray-700 font-inter mt-2">{topGoal ? `$${topGoal.saved} / $${topGoal.target}` : 'Add your first goal in Goals'}</p>
+          <p className="text-sm text-gray-700 font-inter mt-2">{topGoal ? `${formatPHP(topGoal.saved)} / ${formatPHP(topGoal.target)}` : 'Add your first goal in Goals'}</p>
         </div>
 
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-3">Quick View</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Quick View</h3>
           <div className="space-y-2 font-inter text-gray-700">
-            <p>• Latest transaction: {kidHistory[0] ? `${kidHistory[0].note} (-$${kidHistory[0].amount.toFixed(2)})` : 'No transactions yet'}</p>
+            <p>• Latest transaction: {kidHistory[0] ? `${kidHistory[0].note} (${formatSignedPHP(getSignedTransactionAmount(kidHistory[0]))})` : 'No transactions yet'}</p>
             <p>• Pending approvals: {pendingForKid.length}</p>
             <p>• Reminder notifications: {kidNotifications ? 'On' : 'Off'}</p>
             <p>• Balance visibility: {kidShowBalance ? 'Visible' : 'Hidden'}</p>
@@ -547,11 +680,11 @@ export default function DashboardPage() {
       <div className="grid md:grid-cols-3 gap-4">
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Total Saved</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">${totalGoalSaved}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{formatPHP(totalGoalSaved)}</p>
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Goal Target</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">${totalGoalTarget}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{formatPHP(totalGoalTarget)}</p>
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Completion</p>
@@ -560,7 +693,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Add New Goal</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Add New Goal</h3>
         <form onSubmit={handleAddGoal} className="grid gap-3 md:grid-cols-3">
           <input
             type="text"
@@ -583,7 +716,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Savings Goals</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Savings Goals</h3>
         <div className="space-y-5">
           {kidGoals.map((goal) => {
             const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
@@ -592,14 +725,14 @@ export default function DashboardPage() {
               <div key={goal.id} className="bg-white/70 rounded-xl p-4">
                 <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
                   <span>{goal.name}</span>
-                  <span>${goal.saved} / ${goal.target}</span>
+                  <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
                 </div>
                 <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-2">
                   <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percent}%` }}></div>
                 </div>
                 <div className="mt-3 flex items-center justify-between text-xs font-inter text-gray-600">
                   <span>{percent}% complete</span>
-                  <span>${remaining} to go</span>
+                  <span>{formatPHP(remaining)} to go</span>
                 </div>
               </div>
             )
@@ -654,7 +787,7 @@ export default function DashboardPage() {
   const kidTransactionsView = (
     <section className="grid lg:grid-cols-2 gap-6">
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Recent Withdrawals</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Recent Transactions</h3>
         <div className="space-y-3">
           {kidHistory.slice(0, 6).map((item) => (
             <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
@@ -662,21 +795,23 @@ export default function DashboardPage() {
                 <p className="font-inter font-semibold text-gray-800">{item.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{item.when}</p>
               </div>
-              <p className="font-sora font-bold text-red-600">-${item.amount.toFixed(2)}</p>
+              <p className={`font-sora font-bold ${getSignedTransactionAmount(item) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {formatSignedPHP(getSignedTransactionAmount(item))}
+              </p>
             </div>
           ))}
         </div>
       </div>
 
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Pending Requests</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Pending Requests</h3>
         <div className="space-y-3">
           {pendingWithdrawals.length === 0 ? (
             <p className="font-inter text-gray-700">No pending requests.</p>
           ) : (
             pendingWithdrawals.map((item) => (
               <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3">
-                <p className="font-inter font-semibold text-gray-800">${item.amount.toFixed(2)} • {item.note}</p>
+                <p className="font-inter font-semibold text-gray-800">{formatPHP(item.amount)} • {item.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{item.createdAt}</p>
               </div>
             ))
@@ -695,21 +830,21 @@ export default function DashboardPage() {
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Total Spent</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">${totalKidSpent.toFixed(2)}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{formatPHP(totalKidSpent)}</p>
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Average Withdrawal</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">${kidAverageWithdrawal.toFixed(2)}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{formatPHP(kidAverageWithdrawal)}</p>
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Largest Withdrawal</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">${kidLargestWithdrawal.toFixed(2)}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{formatPHP(kidLargestWithdrawal)}</p>
         </div>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Spending by Category</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Spending by Category</h3>
           <div className="space-y-3">
             {kidSpendingByNote.length === 0 ? (
               <p className="font-inter text-gray-700">No spending data yet.</p>
@@ -720,7 +855,7 @@ export default function DashboardPage() {
                   <div key={label}>
                     <div className="flex justify-between text-xs font-inter text-gray-700 mb-1">
                       <span>{label}</span>
-                      <span>${amount.toFixed(2)} ({percentage}%)</span>
+                      <span>{formatPHP(amount)} ({percentage}%)</span>
                     </div>
                     <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden">
                       <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percentage}%` }}></div>
@@ -733,7 +868,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Goal Progress Graph</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Goal Progress Graph</h3>
           <div className="space-y-3">
             {kidGoals.map((goal) => {
               const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
@@ -755,21 +890,21 @@ export default function DashboardPage() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Goal Progress Stats</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Goal Progress Stats</h3>
           <div className="space-y-3 font-inter text-gray-700">
             <p>• Goals active: <span className="font-semibold">{kidGoals.length}</span></p>
             <p>• Combined progress: <span className="font-semibold">{totalGoalProgress}%</span></p>
             <p>• Top goal: <span className="font-semibold">{topGoal ? topGoal.name : 'No goal yet'}</span></p>
-            <p>• Total saved toward goals: <span className="font-semibold">${totalGoalSaved}</span></p>
+            <p>• Total saved toward goals: <span className="font-semibold">{formatPHP(totalGoalSaved)}</span></p>
           </div>
         </div>
 
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Approval & Activity</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Approval & Activity</h3>
           <div className="space-y-3 font-inter text-gray-700">
             <p>• Pending requests: <span className="font-semibold">{pendingForKid.length}</span></p>
             <p>• Approval completion rate: <span className="font-semibold">{kidApprovalRate}%</span></p>
-            <p>• Daily withdraw limit: <span className="font-semibold">${kidDailyWithdrawLimit}</span></p>
+            <p>• Daily withdraw limit: <span className="font-semibold">{formatPHP(kidDailyWithdrawLimit)}</span></p>
             <p>• Current policy: <span className="font-semibold">{instantWithdrawals ? 'Instant mode' : 'Parent approval mode'}</span></p>
           </div>
         </div>
@@ -780,7 +915,7 @@ export default function DashboardPage() {
   const kidSettingsView = (
     <section className="space-y-6">
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-3">Settings Locked</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Settings Locked</h3>
         <p className="font-inter text-gray-700">
           Only parents can access and change settings. If you need to update limits or permissions,
           ask a parent to open the Parent Settings page.
@@ -800,7 +935,7 @@ export default function DashboardPage() {
   const kidProfileView = (
     <section className="space-y-6">
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Profile</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Profile</h3>
         <div className="bg-white/70 rounded-xl p-4 font-inter">
           <div className="flex items-center gap-4 mb-4">
             <div className="text-5xl">{selectedCharacter.emoji}</div>
@@ -859,7 +994,7 @@ export default function DashboardPage() {
       {validKidAccounts.length === 0 ? (
         <div className="glass-card text-center py-8">
           <div className="text-6xl mb-4">👶</div>
-          <h3 className="text-2xl font-sora font-bold text-gray-700 mb-2">No Kid Accounts Yet</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-gray-700 mb-2">No Kid Accounts Yet</h3>
           <p className="text-gray-600 font-inter mb-4">
             Get started by creating kid accounts in Settings
           </p>
@@ -874,7 +1009,7 @@ export default function DashboardPage() {
       ) : (
         <>
           <div className="glass-card">
-            <h2 className="text-2xl font-sora font-bold text-blue-700 mb-4">Quick Actions</h2>
+            <h2 className="text-lg sm:text-2xl font-sora font-bold text-blue-700 mb-3">Quick Actions</h2>
             <div className="grid md:grid-cols-2 gap-4">
               {validKidAccounts.map((username) => (
                 <div key={username} className="bg-white/70 rounded-xl p-4">
@@ -891,7 +1026,7 @@ export default function DashboardPage() {
                               ...prev,
                               [username]: (prev[username] || 0) + parsedAmount
                             }))
-                            alert(`✅ Added $${parsedAmount.toFixed(2)} to ${username}'s account!`)
+                            alert(`✅ Added ${formatPHP(parsedAmount)} to ${username}'s account!`)
                           } else {
                             alert('❌ Invalid amount')
                           }
@@ -909,7 +1044,7 @@ export default function DashboardPage() {
 
           <div className="grid lg:grid-cols-2 gap-6">
             <div className="glass-card">
-              <h2 className="text-2xl font-sora font-bold text-blue-700 mb-4">All Kids Balances</h2>
+              <h2 className="text-lg sm:text-2xl font-sora font-bold text-blue-700 mb-3">All Kids Balances</h2>
               <div className="space-y-3">
                 {parentChildren.map((child) => (
                   <div key={child.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
@@ -917,14 +1052,14 @@ export default function DashboardPage() {
                       <p className="font-inter font-semibold text-gray-800">{child.name}</p>
                       <p className="text-xs text-gray-600 font-inter">{child.withdrawalsThisWeek} withdrawals logged</p>
                     </div>
-                    <p className="font-sora font-bold text-blue-700">${child.balance.toFixed(2)}</p>
+                    <p className="font-sora font-bold text-blue-700">{formatPHP(child.balance)}</p>
                   </div>
                 ))}
               </div>
             </div>
 
             <div className="glass-card">
-              <h2 className="text-2xl font-sora font-bold text-blue-700 mb-4">Alerts</h2>
+              <h2 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Alerts</h2>
               <div className="space-y-3">
                 {parentAlerts.map((alert, index) => (
                   <div key={index} className="bg-white/70 rounded-xl px-4 py-3">
@@ -941,7 +1076,7 @@ export default function DashboardPage() {
 
   const parentGoalsView = (
     <section className="glass-card">
-      <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Kids Goal Progress</h3>
+      <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Kids Goal Progress</h3>
       <div className="space-y-5">
         {parentGoals.length === 0 ? (
           <p className="font-inter text-gray-700">No goals created yet.</p>
@@ -966,14 +1101,14 @@ export default function DashboardPage() {
   const parentTransactionsView = (
     <section className="grid lg:grid-cols-2 gap-6">
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Pending Authorization</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Pending Authorization</h3>
         <div className="space-y-3">
           {parentPending.length === 0 ? (
             <p className="font-inter text-gray-700">No pending requests.</p>
           ) : (
             parentPending.map((item) => (
               <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3">
-                <p className="font-inter font-semibold text-gray-800">{item.child} • ${item.amount.toFixed(2)}</p>
+                <p className="font-inter font-semibold text-gray-800">{item.child} • {formatPHP(item.amount)}</p>
                 <p className="text-xs text-gray-600 font-inter mb-3">{item.note} • {item.createdAt}</p>
                 <div className="flex gap-2">
                   <button
@@ -998,7 +1133,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="glass-card">
-        <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Withdrawal History</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Transaction History</h3>
         <div className="space-y-3">
           {history.slice(0, 8).map((entry) => (
             <div key={entry.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
@@ -1006,7 +1141,9 @@ export default function DashboardPage() {
                 <p className="font-inter font-semibold text-gray-800">{entry.child} • {entry.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{entry.when}</p>
               </div>
-              <p className="font-sora font-bold text-red-600">-${entry.amount.toFixed(2)}</p>
+              <p className={`font-sora font-bold ${getSignedTransactionAmount(entry) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {formatSignedPHP(getSignedTransactionAmount(entry))}
+              </p>
             </div>
           ))}
         </div>
@@ -1019,12 +1156,12 @@ export default function DashboardPage() {
       <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-6">
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Total Withdrawals</p>
-          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{history.length}</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">{outgoingHistory.length}</p>
         </div>
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Total Amount</p>
           <p className="text-4xl font-sora font-black text-blue-700 mt-2">
-            ${history.reduce((sum, item) => sum + item.amount, 0).toFixed(2)}
+            {formatPHP(totalOutgoingHistoryAmount)}
           </p>
         </div>
         <div className="glass-card text-center">
@@ -1034,14 +1171,14 @@ export default function DashboardPage() {
         <div className="glass-card text-center">
           <p className="text-gray-600 font-inter">Average Withdrawal</p>
           <p className="text-4xl font-sora font-black text-blue-700 mt-2">
-            ${history.length > 0 ? (history.reduce((sum, item) => sum + item.amount, 0) / history.length).toFixed(2) : '0.00'}
+            {formatPHP(outgoingHistory.length > 0 ? (totalOutgoingHistoryAmount / outgoingHistory.length) : 0)}
           </p>
         </div>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Withdrawals by Child (Graph)</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Withdrawals by Child (Graph)</h3>
           <div className="space-y-3">
             {parentSpendingByChild.map((row) => {
               const maxAmount = Math.max(...parentSpendingByChild.map((item) => item.amount), 1)
@@ -1050,7 +1187,7 @@ export default function DashboardPage() {
                 <div key={row.name}>
                   <div className="flex justify-between text-xs font-inter text-gray-700 mb-1">
                     <span>{row.name}</span>
-                    <span>${row.amount.toFixed(2)}</span>
+                    <span>{formatPHP(row.amount)}</span>
                   </div>
                   <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden">
                     <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${widthPercent}%` }}></div>
@@ -1062,7 +1199,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Approval Flow (Graph)</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Approval Flow (Graph)</h3>
           <div className="space-y-3">
             <div>
               <div className="flex justify-between text-xs font-inter text-gray-700 mb-1">
@@ -1099,21 +1236,21 @@ export default function DashboardPage() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Policy Snapshot</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Policy Snapshot</h3>
           <div className="space-y-2 font-inter text-gray-700">
             <p>• Instant withdrawals: <span className="font-semibold">{instantWithdrawals ? 'Enabled' : 'Disabled'}</span></p>
-            <p>• Kid daily limit: <span className="font-semibold">${kidDailyWithdrawLimit}</span></p>
-            <p>• Auto-approve limit: <span className="font-semibold">${parentAutoApproveLimit.toFixed(2)}</span></p>
+            <p>• Kid daily limit: <span className="font-semibold">{formatPHP(kidDailyWithdrawLimit)}</span></p>
+            <p>• Auto-approve limit: <span className="font-semibold">{formatPHP(parentAutoApproveLimit)}</span></p>
             <p>• Spending alerts: <span className="font-semibold">{parentSpendingAlerts ? 'On' : 'Off'}</span></p>
           </div>
         </div>
 
         <div className="glass-card">
-          <h3 className="text-2xl font-sora font-bold text-blue-700 mb-4">Child Breakdown</h3>
+          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Child Breakdown</h3>
           <div className="space-y-2 font-inter text-gray-700">
             {parentChildren.map((child) => (
               <p key={child.id}>
-                • {child.name}: <span className="font-semibold">${child.balance.toFixed(2)}</span> balance, {child.withdrawalsThisWeek} withdrawals
+                • {child.name}: <span className="font-semibold">{formatPHP(child.balance)}</span> balance, {child.withdrawalsThisWeek} withdrawals
               </p>
             ))}
           </div>
@@ -1125,7 +1262,7 @@ export default function DashboardPage() {
   const parentSettingsView = (
     <section className="space-y-6">
       <div className="glass-card space-y-5">
-        <h3 className="text-2xl font-sora font-bold text-blue-700">Parent Settings</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Parent Settings</h3>
         <div className="bg-white/70 rounded-xl p-4 flex items-center justify-between gap-4">
           <div>
             <p className="font-inter font-semibold text-gray-800">Allow immediate kid withdrawals</p>
@@ -1165,7 +1302,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="bg-white/70 rounded-xl p-4">
-          <p className="font-inter font-semibold text-gray-800 mb-2">Kid daily withdraw limit ($)</p>
+          <p className="font-inter font-semibold text-gray-800 mb-2">Kid daily withdraw limit (PHP)</p>
           <div className="flex items-center gap-3 mb-4">
             <input
               type="number"
@@ -1178,7 +1315,7 @@ export default function DashboardPage() {
             <p className="text-sm text-gray-600 font-inter">Maximum request amount allowed for kids.</p>
           </div>
 
-          <p className="font-inter font-semibold text-gray-800 mb-2">Auto-approve limit ($)</p>
+          <p className="font-inter font-semibold text-gray-800 mb-2">Auto-approve limit (PHP)</p>
           <div className="flex items-center gap-3">
             <input
               type="number"
@@ -1299,7 +1436,7 @@ export default function DashboardPage() {
                   <div key={username} className="flex items-center justify-between bg-white rounded-lg p-3 border border-gray-200">
                     <div className="flex-1">
                       <p className="font-inter font-bold text-gray-800">👶 {username}</p>
-                      <p className="text-sm text-gray-600 font-inter">Balance: ${(kidBalances[username] || 0).toFixed(2)}</p>
+                      <p className="text-sm text-gray-600 font-inter">Balance: {formatPHP(kidBalances[username] || 0)}</p>
                     </div>
                     <button
                       type="button"
@@ -1366,7 +1503,7 @@ export default function DashboardPage() {
 
   const parentProfileView = (
     <section className="glass-card space-y-4">
-      <h3 className="text-2xl font-sora font-bold text-blue-700">Profile</h3>
+      <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Profile</h3>
       <div className="bg-white/70 rounded-xl p-4 font-inter">
         <p><span className="font-semibold">Name:</span> Parent Account</p>
         <p><span className="font-semibold">Role:</span> Parent</p>
@@ -1441,25 +1578,26 @@ export default function DashboardPage() {
           </div>
         </aside>
 
-        <main className="flex-1 p-4 md:p-8">
+        <main className="flex-1 p-3 sm:p-4 md:p-8">
           <div className="md:hidden mb-4 space-y-3">
             <div className="flex items-center justify-between">
-              <h1 className="text-3xl font-sora font-black text-white drop-shadow-lg">C.A.S.H.</h1>
-              <span className="bg-white/80 text-blue-700 px-4 py-2 rounded-xl font-sora font-semibold">
+              <h1 className="text-2xl sm:text-3xl font-sora font-black text-white drop-shadow-lg">C.A.S.H.</h1>
+              <span className="bg-white/80 text-blue-700 px-3 py-2 rounded-xl font-sora font-semibold text-xs sm:text-sm">
                 {role === 'kid' ? 'Kid View' : 'Parent View'}
               </span>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="flex gap-1">
               {visibleMenuItems.map((item) => (
                 <button
                   key={item.key}
                   type="button"
                   onClick={() => setActiveMenu(item.key)}
-                  className={`whitespace-nowrap px-3 py-2 rounded-lg font-inter font-semibold ${
+                  className={`flex-1 flex flex-col items-center py-2 px-1 rounded-lg font-inter font-semibold transition-all ${
                     activeMenu === item.key ? 'bg-white text-blue-700' : 'bg-white/40 text-white'
                   }`}
                 >
-                  {item.icon} {item.label}
+                  <span className="text-xl">{item.icon}</span>
+                  <span className="text-[10px] mt-0.5 leading-tight">{item.label}</span>
                 </button>
               ))}
             </div>
@@ -1470,6 +1608,13 @@ export default function DashboardPage() {
       </div>
 
       {/* Puppy widget removed */}
+
+      {depositToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-green-500 text-white px-4 py-3 sm:px-6 sm:py-4 rounded-2xl shadow-2xl font-sora font-bold text-sm sm:text-xl flex items-center gap-2 sm:gap-3 animate-bounce max-w-[90vw] text-center">
+          <span>💰</span>
+          <span>{depositToast}</span>
+        </div>
+      )}
     </div>
   )
 }

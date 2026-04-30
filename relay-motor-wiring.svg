@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920">
+  <defs>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #0f172a; }
+      .h { font: 700 20px Arial, sans-serif; fill: #0f172a; }
+      .t { font: 600 16px Arial, sans-serif; fill: #1f2937; }
+      .s { font: 500 14px Arial, sans-serif; fill: #374151; }
+      .box { fill: #f8fafc; stroke: #0f172a; stroke-width: 2; rx: 12; }
+      .relay { fill: #e0f2fe; stroke: #0369a1; stroke-width: 2; rx: 10; }
+      .term { fill: #ffffff; stroke: #334155; stroke-width: 1.8; rx: 6; }
+      .plus { stroke: #dc2626; stroke-width: 4; fill: none; }
+      .gnd { stroke: #111827; stroke-width: 4; fill: none; }
+      .motor { stroke: #059669; stroke-width: 4; fill: none; }
+      .ctrl { stroke: #2563eb; stroke-width: 3; fill: none; }
+    </style>
+  </defs>
+
+  <text x="30" y="42" class="title">Clear Wiring: ESP32 + 4-Channel Relay + 12V DC Motor (Forward/Reverse)</text>
+
+  <rect x="30" y="70" width="410" height="250" class="box"/>
+  <text x="50" y="102" class="h">1) ESP32 to Relay Inputs</text>
+  <text x="52" y="138" class="t">GPIO25 -> IN1 (Relay 1)</text>
+  <text x="52" y="168" class="t">GPIO26 -> IN2 (Relay 2)</text>
+  <text x="52" y="198" class="t">GPIO27 -> IN3 (Relay 3 enable)</text>
+  <text x="52" y="228" class="t">ESP32 5V -> Relay VCC</text>
+  <text x="52" y="258" class="t">ESP32 GND -> Relay GND</text>
+  <text x="52" y="292" class="s">IN4 unused</text>
+
+  <rect x="470" y="70" width="900" height="800" class="box"/>
+  <text x="490" y="102" class="h">2) Power Wiring (exact contact mapping)</text>
+
+  <rect x="500" y="130" width="190" height="96" class="box"/>
+  <text x="520" y="166" class="t">12V Battery</text>
+  <text x="520" y="196" class="s">+ and GND</text>
+
+  <rect x="730" y="146" width="120" height="64" class="box"/>
+  <text x="770" y="185" class="t">Fuse</text>
+
+  <path d="M850 178 L1320 178" class="plus"/>
+  <text x="1180" y="162" class="t" fill="#dc2626">+12V BUS</text>
+
+  <path d="M690 210 L1320 210" opacity="0"/>
+  <path d="M850 800 L1320 800" class="gnd"/>
+  <text x="1200" y="786" class="t">GND BUS</text>
+
+  <path d="M690 162 L730 178" class="plus"/>
+  <path d="M690 194 L850 800" class="gnd"/>
+
+  <rect x="520" y="280" width="250" height="210" class="relay"/>
+  <text x="540" y="312" class="h">Relay 1 (R1)</text>
+  <text x="540" y="336" class="s">Motor side A selector</text>
+  <rect x="540" y="355" width="62" height="42" class="term"/>
+  <rect x="614" y="355" width="62" height="42" class="term"/>
+  <rect x="688" y="355" width="62" height="42" class="term"/>
+  <text x="556" y="382" class="t">NC</text>
+  <text x="629" y="382" class="t">COM</text>
+  <text x="704" y="382" class="t">NO</text>
+  <text x="540" y="430" class="t">NC -> GND BUS</text>
+  <text x="540" y="456" class="t">COM -> Motor A</text>
+  <text x="540" y="482" class="t">NO -> +12V BUS</text>
+
+  <rect x="810" y="280" width="250" height="210" class="relay"/>
+  <text x="830" y="312" class="h">Relay 2 (R2)</text>
+  <text x="830" y="336" class="s">Motor side B selector</text>
+  <rect x="830" y="355" width="62" height="42" class="term"/>
+  <rect x="904" y="355" width="62" height="42" class="term"/>
+  <rect x="978" y="355" width="62" height="42" class="term"/>
+  <text x="846" y="382" class="t">NC</text>
+  <text x="919" y="382" class="t">COM</text>
+  <text x="994" y="382" class="t">NO</text>
+  <text x="830" y="430" class="t">NC -> +12V BUS</text>
+  <text x="830" y="456" class="t">COM -> Motor B</text>
+  <text x="830" y="482" class="t">NO -> GND BUS</text>
+
+  <rect x="1100" y="280" width="250" height="210" class="relay"/>
+  <text x="1120" y="312" class="h">Relay 3 (R3)</text>
+  <text x="1120" y="336" class="s">Master power enable</text>
+  <rect x="1120" y="355" width="62" height="42" class="term"/>
+  <rect x="1194" y="355" width="62" height="42" class="term"/>
+  <rect x="1268" y="355" width="62" height="42" class="term"/>
+  <text x="1136" y="382" class="t">NC</text>
+  <text x="1209" y="382" class="t">COM</text>
+  <text x="1284" y="382" class="t">NO</text>
+  <text x="1120" y="430" class="t">COM <- Fuse output</text>
+  <text x="1120" y="456" class="t">NO -> +12V BUS</text>
+  <text x="1120" y="482" class="t">NC unused</text>
+
+  <rect x="790" y="560" width="290" height="110" class="box"/>
+  <text x="860" y="602" class="h">12V DC Motor</text>
+  <text x="815" y="636" class="t">Motor A terminal      Motor B terminal</text>
+
+  <path d="M719 376 L850 800" class="gnd"/>
+  <path d="M719 376 L719 800" opacity="0"/>
+  <path d="M719 376 L719 800" opacity="0"/>
+  <path d="M719 376 L719 800" opacity="0"/>
+
+  <path d="M719 376 L719 178" class="plus"/>
+  <path d="M571 376 L571 800" class="gnd"/>
+  <path d="M645 376 L865 560" class="motor"/>
+
+  <path d="M1060 376 L1060 800" class="gnd"/>
+  <path d="M846 376 L846 178" class="plus"/>
+  <path d="M935 376 L1005 560" class="motor"/>
+
+  <path d="M1225 376 L790 178" class="plus"/>
+  <path d="M1299 376 L1299 178" class="plus"/>
+
+  <rect x="520" y="700" width="830" height="150" class="box"/>
+  <text x="540" y="732" class="h">3) Direction states (easy check)</text>
+  <text x="540" y="764" class="t">R3 ON, R1 ON,  R2 ON   = Direction 1 (UP)</text>
+  <text x="540" y="792" class="t">R3 ON, R1 OFF, R2 OFF  = Direction 2 (DOWN)</text>
+  <text x="540" y="820" class="t">R3 OFF                 = STOP (motor power cut)</text>
+
+  <text x="30" y="892" class="s">Colors: Red = +12V, Black = GND, Green = motor leads, Blue = ESP32 control wires.</text>
+</svg>
