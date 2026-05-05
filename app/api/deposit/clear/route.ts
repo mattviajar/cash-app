@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
-import { consumeDeposits } from '../queue'
+import { prisma } from '@/lib/prisma'
 
 export async function POST() {
-  const cleared = consumeDeposits().length
-  return NextResponse.json({ ok: true, cleared })
+  const result = await prisma.depositQueue.deleteMany({})
+  return NextResponse.json({ ok: true, cleared: result.count })
 }

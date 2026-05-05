@@ -1,0 +1,77 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Account {
+  id               String         @id @default(cuid())
+  username         String         @unique
+  passwordHash     String
+  role             String
+  securityQuestion String?
+  securityAnswer   String?
+  balance          Float          @default(0)
+  character        String         @default("astronaut")
+  showBalance      Boolean        @default(true)
+  requireNote      Boolean        @default(false)
+  dailyLimit       Float          @default(25)
+  notifications    Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  transactions     Transaction[]
+  goals            Goal[]
+  parentSettings   ParentSettings?
+}
+
+model Transaction {
+  id        Int      @id @default(autoincrement())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id])
+  amount    Float
+  note      String
+  kind      String   @default("manual")
+  when      String   @default("Just now")
+  createdAt DateTime @default(now())
+}
+
+model Goal {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id])
+  name      String
+  target    Float
+  saved     Float    @default(0)
+  createdAt DateTime @default(now())
+}
+
+model ParentSettings {
+  id                 String  @id @default(cuid())
+  accountId          String  @unique
+  account            Account @relation(fields: [accountId], references: [id])
+  instantWithdrawals Boolean @default(false)
+  autoApproveLimit   Float   @default(0)
+  spendingAlerts     Boolean @default(true)
+}
+
+model PendingWithdrawal {
+  id        Int      @id @default(autoincrement())
+  child     String
+  amount    Float
+  note      String
+  createdAt DateTime @default(now())
+}
+
+model DepositQueue {
+  id        Int      @id @default(autoincrement())
+  amount    Float
+  createdAt DateTime @default(now())
+}
+
+model CommandQueue {
+  id        Int      @id @default(autoincrement())
+  command   String
+  createdAt DateTime @default(now())
+}
+

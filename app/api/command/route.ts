@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server'
-
-// In-memory queue of serial commands to forward to the ESP32.
-const commandQueue: string[] = []
+import { prisma } from '@/lib/prisma'
 
 // Producer: dashboard posts commands here when a withdrawal is approved.
 export async function POST(request: Request) {
@@ -17,7 +15,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing or invalid command' }, { status: 400 })
   }
 
-  commandQueue.push(cmd)
+  await prisma.commandQueue.create({ data: { command: cmd } })
   return NextResponse.json({ ok: true })
 }
 
@@ -27,9 +25,11 @@ export async function GET(request: Request) {
   const consume = searchParams.get('consume') === 'true'
 
   if (consume) {
-    const commands = commandQueue.splice(0)
-    return NextResponse.json({ commands })
+    const rows = await prisma.commandQueue.findMany({ orderBy: { id: 'asc' } })
+    await prisma.commandQueue.deleteMany({})
+    return NextResponse.json({ commands: rows.map((c) => c.command) })
   }
 
-  return NextResponse.json({ commands: [...commandQueue] })
+  const rows = await prisma.commandQueue.findMany({ orderBy: { id: 'asc' } })
+  return NextResponse.json({ commands: rows.map((c) => c.command) })
 }

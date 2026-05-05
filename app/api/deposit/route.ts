@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { consumeDeposits, enqueueDeposit, snapshotDeposits } from './queue'
+import { prisma } from '@/lib/prisma'
 
 // Producer endpoint: hardware bridge posts deposits here.
 export async function POST(request: Request) {
@@ -15,22 +15,28 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
   }
 
-  const item = enqueueDeposit(amount)
+  const item = await prisma.depositQueue.create({
+    data: { amount: Math.round(amount * 100) / 100 },
+  })
   return NextResponse.json({ ok: true, item })
 }
 
-// Consumer endpoint: dashboard polls and drains queue with ?consume=true.
-// Without consume flag, returns a read-only snapshot.
+// Consumer endpoint: dashboard polls with ?since=<id> for new deposits.
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const consume = searchParams.get('consume') === 'true'
   const sinceRaw = Number(searchParams.get('since') ?? '0')
   const sinceId = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0
 
-  if (!consume) {
-    return NextResponse.json({ deposits: snapshotDeposits(sinceId) })
+  if (consume) {
+    const deposits = await prisma.depositQueue.findMany({ orderBy: { id: 'asc' } })
+    await prisma.depositQueue.deleteMany({})
+    return NextResponse.json({ deposits })
   }
 
-  const deposits = consumeDeposits()
+  const deposits = await prisma.depositQueue.findMany({
+    where: { id: { gt: sinceId } },
+    orderBy: { id: 'asc' },
+  })
   return NextResponse.json({ deposits })
 }
