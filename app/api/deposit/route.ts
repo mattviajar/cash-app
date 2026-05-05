@@ -24,9 +24,11 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const consume = searchParams.get('consume') === 'true'
+  const sinceRaw = Number(searchParams.get('since') ?? '0')
+  const sinceId = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0
 
   if (!consume) {
-    return NextResponse.json({ deposits: snapshotDeposits() })
+    return NextResponse.json({ deposits: snapshotDeposits(sinceId) })
   }
 
   const deposits = consumeDeposits()

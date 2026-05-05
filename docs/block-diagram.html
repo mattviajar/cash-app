@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ATM Learning System — Block Diagram</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #93c5fd;
+    margin-bottom: 36px;
+    letter-spacing: 0.05em;
+  }
+
+  /* ── Layout columns ── */
+  .diagram {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr 60px 1fr;
+    grid-template-rows: auto;
+    gap: 0;
+    max-width: 1100px;
+    margin: 0 auto;
+    align-items: start;
+  }
+
+  /* ── Layer panels ── */
+  .layer {
+    border-radius: 14px;
+    padding: 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .layer-hw   { background: #1e293b; border: 2px solid #334155; }
+  .layer-sw   { background: #172033; border: 2px solid #1e3a5f; }
+  .layer-web  { background: #1a1a2e; border: 2px solid #312e7a; }
+
+  .layer-title {
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    text-align: center;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #334155;
+    margin-bottom: 4px;
+  }
+  .layer-hw   .layer-title { color: #f59e0b; }
+  .layer-sw   .layer-title { color: #34d399; }
+  .layer-web  .layer-title { color: #818cf8; }
+
+  /* ── Boxes ── */
+  .box {
+    border-radius: 10px;
+    padding: 9px 11px;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    text-align: center;
+    position: relative;
+  }
+  .box .label { font-weight: 700; font-size: 0.75rem; display: block; margin-bottom: 2px; }
+  .box .sub   { font-size: 0.62rem; color: #94a3b8; }
+
+  .box-input    { background: #1c3144; border: 1.5px solid #0ea5e9; color: #7dd3fc; }
+  .box-esp      { background: #1a2e1a; border: 1.5px solid #22c55e; color: #86efac; }
+  .box-pca      { background: #2a1f10; border: 1.5px solid #f59e0b; color: #fcd34d; }
+  .box-motor    { background: #2a1a10; border: 1.5px solid #f97316; color: #fdba74; }
+  .box-ir       { background: #1c1c2e; border: 1.5px solid #a78bfa; color: #c4b5fd; }
+  .box-uno      { background: #1a2030; border: 1.5px solid #60a5fa; color: #93c5fd; }
+  .box-bridge   { background: #0f2c1a; border: 1.5px solid #34d399; color: #6ee7b7; }
+  .box-api      { background: #0f1f30; border: 1.5px solid #38bdf8; color: #7dd3fc; }
+  .box-dashboard{ background: #1a1440; border: 1.5px solid #818cf8; color: #c7d2fe; }
+  .box-role     { background: #1e1040; border: 1.5px solid #a78bfa; color: #ddd6fe; }
+  .box-browser  { background: #0d0d22; border: 2px solid #6366f1; color: #a5b4fc; }
+
+  /* ── Group sub-panels ── */
+  .group {
+    border-radius: 10px;
+    padding: 10px 9px;
+    border: 1px dashed #334155;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .group-title {
+    font-size: 0.58rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #64748b;
+    margin-bottom: 2px;
+  }
+  .row { display: flex; gap: 8px; }
+  .row > .box { flex: 1; }
+
+  /* ── Arrow columns ── */
+  .arrow-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding-top: 48px;
+  }
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 6px 0;
+  }
+  .arrow .line {
+    width: 2px;
+    background: #475569;
+    flex: 1;
+    min-height: 18px;
+  }
+  .arrow .head {
+    width: 0; height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid #475569;
+  }
+  .arrow .head-up {
+    width: 0; height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-bottom: 8px solid #475569;
+  }
+  .arrow .label {
+    font-size: 0.55rem;
+    color: #64748b;
+    text-align: center;
+    max-width: 56px;
+    line-height: 1.2;
+    margin: 2px 0;
+  }
+  .arrow-both { color: #475569; font-size: 1.1rem; text-align: center; line-height: 1; }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 28px;
+    max-width: 1100px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.65rem;
+    color: #94a3b8;
+  }
+  .legend-dot {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    border: 2px solid;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>ATM Learning System — System Block Diagram</h1>
+
+<div class="diagram">
+
+  <!-- ══════════════ COLUMN 1: HARDWARE ══════════════ -->
+  <div class="layer layer-hw">
+    <div class="layer-title">⚙ Hardware Layer</div>
+
+    <div class="group">
+      <div class="group-title">Input Devices</div>
+      <div class="row">
+        <div class="box box-input">
+          <span class="label">Coin Slot</span>
+          <span class="sub">GPIO 14 · Pull-up<br/>CH-926 Acceptor</span>
+        </div>
+        <div class="box box-input">
+          <span class="label">Bill Acceptor</span>
+          <span class="sub">GPIO 32 · Pull-up<br/>Pulse output</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">ESP32 Controller</div>
+      <div class="box box-esp">
+        <span class="label">Pulse Decoder</span>
+        <span class="sub">coin &amp; bill pulse counting<br/>idle-gap finalization</span>
+      </div>
+      <div class="box box-esp">
+        <span class="label">Bill Router</span>
+        <span class="sub">elevator state machine<br/>IR5 position tracking</span>
+      </div>
+      <div class="box box-esp">
+        <span class="label">Withdraw Job</span>
+        <span class="sub">bill decomposition<br/>coin remainder payout</span>
+      </div>
+      <div class="box box-esp">
+        <span class="label">Serial Output</span>
+        <span class="sub">DEPOSIT: / EVENT<br/>via USB COM5</span>
+      </div>
+      <div class="box box-esp">
+        <span class="label">UART Bridge</span>
+        <span class="sub">GPIO 16 (RX) / 17 (TX)<br/>to Arduino Uno</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">PCA9685 Servo Driver (I²C 0x40)</div>
+      <div class="row">
+        <div class="box box-pca">
+          <span class="label">CH0–CH4</span>
+          <span class="sub">Storage<br/>Spinners</span>
+        </div>
+        <div class="box box-pca">
+          <span class="label">CH5</span>
+          <span class="sub">Elevator<br/>Lift</span>
+        </div>
+        <div class="box box-pca">
+          <span class="label">CH6</span>
+          <span class="sub">Elevator<br/>Output</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">Position Sensors</div>
+      <div class="row">
+        <div class="box box-ir"><span class="label">IR5-1</span><span class="sub">GPIO 34</span></div>
+        <div class="box box-ir"><span class="label">IR5-2</span><span class="sub">GPIO 33</span></div>
+        <div class="box box-ir"><span class="label">IR5-3</span><span class="sub">GPIO 25</span></div>
+        <div class="box box-ir"><span class="label">IR5-4</span><span class="sub">GPIO 26</span></div>
+        <div class="box box-ir"><span class="label">IR5-5</span><span class="sub">GPIO 4</span></div>
+      </div>
+      <div class="box box-ir"><span class="label">IR4 — Coin Dispense Detect</span><span class="sub">GPIO 27</span></div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">Arduino Uno — Motor Coprocessor</div>
+      <div class="row">
+        <div class="box box-uno"><span class="label">Motor 1</span><span class="sub">PHP 1<br/>Stepper</span></div>
+        <div class="box box-uno"><span class="label">Motor 2</span><span class="sub">PHP 5<br/>Stepper</span></div>
+        <div class="box box-uno"><span class="label">Motor 3</span><span class="sub">PHP 10<br/>Stepper</span></div>
+        <div class="box box-motor"><span class="label">Motor 4</span><span class="sub">PHP 20<br/>ESP32 direct<br/>GPIO 18/19/23/13</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ ARROW 1 ══════════════ -->
+  <div class="arrow-col">
+    <div class="arrow">
+      <span class="label">USB<br/>COM5<br/>115200</span>
+      <div class="line" style="min-height:30px"></div>
+      <div class="head"></div>
+    </div>
+    <div style="margin-top:12px" class="arrow">
+      <div class="head-up"></div>
+      <div class="line" style="min-height:24px"></div>
+      <span class="label">WITHDRAW<br/>CMD</span>
+    </div>
+  </div>
+
+  <!-- ══════════════ COLUMN 2: SOFTWARE BRIDGE + API ══════════════ -->
+  <div class="layer layer-sw">
+    <div class="layer-title">⚡ Software Layer (Host PC)</div>
+
+    <div class="group">
+      <div class="group-title">Python Serial Bridge · serial_bridge.py</div>
+      <div class="box box-bridge">
+        <span class="label">Read Serial COM5</span>
+        <span class="sub">Listen for DEPOSIT: lines<br/>from ESP32 @ 115200</span>
+      </div>
+      <div class="box box-bridge">
+        <span class="label">POST /api/deposit</span>
+        <span class="sub">Forwards amount to<br/>Next.js deposit queue</span>
+      </div>
+      <div class="box box-bridge">
+        <span class="label">GET /api/command</span>
+        <span class="sub">Polls for WITHDRAW cmd<br/>writes to ESP32 serial</span>
+      </div>
+    </div>
+
+    <div class="group" style="margin-top:12px">
+      <div class="group-title">Next.js API Routes · port 3001</div>
+      <div class="box box-api">
+        <span class="label">/api/deposit</span>
+        <span class="sub">POST — enqueue deposit<br/>GET ?consume=true — drain</span>
+      </div>
+      <div class="box box-api">
+        <span class="label">/api/command</span>
+        <span class="sub">POST — enqueue command<br/>GET ?consume=true — drain</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ ARROW 2 ══════════════ -->
+  <div class="arrow-col">
+    <div class="arrow">
+      <span class="label">HTTP<br/>LAN /<br/>Wi-Fi</span>
+      <div class="line" style="min-height:30px"></div>
+      <div class="head"></div>
+    </div>
+    <div style="margin-top:12px" class="arrow">
+      <div class="head-up"></div>
+      <div class="line" style="min-height:24px"></div>
+      <span class="label">Browser<br/>requests</span>
+    </div>
+  </div>
+
+  <!-- ══════════════ COLUMN 3: WEB APP ══════════════ -->
+  <div class="layer layer-web">
+    <div class="layer-title">🌐 Web App Layer (Browser)</div>
+
+    <div class="group">
+      <div class="group-title">Next.js Dashboard · page.tsx</div>
+      <div class="box box-dashboard">
+        <span class="label">Dashboard</span>
+        <span class="sub">Polls /api/deposit every 1.5s<br/>Polls /api/command for status</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">Kid Role</div>
+      <div class="box box-role">
+        <span class="label">Balance &amp; History</span>
+        <span class="sub">View balance<br/>Transaction history<br/>Goals tracker</span>
+      </div>
+      <div class="box box-role">
+        <span class="label">Withdrawal Request</span>
+        <span class="sub">Request any amount<br/>Pending approval</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">Parent Role</div>
+      <div class="box box-role">
+        <span class="label">Cash-In (Deposit)</span>
+        <span class="sub">Set target amount<br/>Insert coins/bills<br/>Auto or manual confirm</span>
+      </div>
+      <div class="box box-role">
+        <span class="label">Approve Withdrawal</span>
+        <span class="sub">Review pending requests<br/>Approve → triggers<br/>WITHDRAW command</span>
+      </div>
+      <div class="box box-role">
+        <span class="label">Account Management</span>
+        <span class="sub">Kid accounts · Limits<br/>Settings · Audit log</span>
+      </div>
+    </div>
+
+    <div class="group" style="margin-top:8px">
+      <div class="group-title">Any Device on Local Wi-Fi</div>
+      <div class="box box-browser">
+        <span class="label">Browser</span>
+        <span class="sub">http://&lt;host-ip&gt;:3001<br/>Phone · Tablet · Laptop</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="border-color:#0ea5e9;background:#1c3144"></div>Input Device</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#22c55e;background:#1a2e1a"></div>ESP32 Logic</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#f59e0b;background:#2a1f10"></div>PCA9685 Servo</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#f97316;background:#2a1a10"></div>Stepper Motor</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#a78bfa;background:#1c1c2e"></div>IR Sensor</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#60a5fa;background:#1a2030"></div>Arduino Uno</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#34d399;background:#0f2c1a"></div>Serial Bridge</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#38bdf8;background:#0f1f30"></div>API Route</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#818cf8;background:#1a1440"></div>Dashboard</div>
+  <div class="legend-item"><div class="legend-dot" style="border-color:#6366f1;background:#0d0d22"></div>Browser Client</div>
+</div>
+
+</body>
+</html>

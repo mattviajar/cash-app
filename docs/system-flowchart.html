@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATM Learning System – System Flowchart</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', Arial, sans-serif;
+    background: #f0f4f8;
+    padding: 32px 16px 64px;
+    color: #1e293b;
+  }
+
+  .page-title {
+    text-align: center;
+    margin-bottom: 8px;
+  }
+  .page-title h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: #0f172a;
+    letter-spacing: -0.3px;
+  }
+  .page-title p {
+    font-size: 13px;
+    color: #64748b;
+    margin-top: 4px;
+  }
+
+  /* ── Layout: two columns ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    max-width: 1100px;
+    margin: 32px auto 0;
+  }
+
+  .flow-card {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    padding: 28px 24px 32px;
+  }
+
+  .flow-card h2 {
+    font-size: 15px;
+    font-weight: 700;
+    text-align: center;
+    letter-spacing: 0.3px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid currentColor;
+  }
+  .deposit-card h2  { color: #1d4ed8; border-color: #bfdbfe; }
+  .withdraw-card h2 { color: #7c3aed; border-color: #ddd6fe; }
+
+  /* ── Shape base styles ── */
+  .fc-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* Arrow connector */
+  .arrow {
+    width: 2px;
+    height: 20px;
+    background: #94a3b8;
+    position: relative;
+    margin: 0 auto;
+  }
+  .arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 7px solid #94a3b8;
+  }
+  .arrow.branch-label {
+    height: 28px;
+  }
+
+  /* ─── Shape: Terminal (rounded rect – start/end) ─── */
+  .shape-terminal {
+    border-radius: 50px;
+    padding: 10px 28px;
+    font-size: 13px;
+    font-weight: 700;
+    text-align: center;
+    min-width: 140px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .shape-terminal.start {
+    background: #0f172a;
+    color: #fff;
+  }
+  .shape-terminal.end {
+    background: #0f172a;
+    color: #fff;
+  }
+
+  /* ─── Shape: Process (rectangle) ─── */
+  .shape-process {
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 12.5px;
+    font-weight: 500;
+    text-align: center;
+    min-width: 220px;
+    max-width: 280px;
+    line-height: 1.4;
+  }
+
+  /* ─── Shape: Decision (diamond via clip-path) ─── */
+  .diamond-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 200px;
+    height: 72px;
+    position: relative;
+  }
+  .diamond-wrap .diamond-bg {
+    position: absolute;
+    inset: 0;
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+    background: #fef9c3;
+    border: none;
+  }
+  .diamond-wrap .diamond-bg.purple { background: #f3e8ff; }
+  .diamond-wrap .diamond-bg.blue   { background: #dbeafe; }
+  .diamond-wrap .diamond-text {
+    position: relative;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-align: center;
+    padding: 0 28px;
+    color: #1e293b;
+    line-height: 1.3;
+    z-index: 1;
+  }
+
+  /* Branch row (Yes / No) */
+  .branch-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0;
+    width: 100%;
+    margin-top: 0;
+  }
+  .branch-arm {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .branch-line-h {
+    height: 2px;
+    width: 50px;
+    background: #94a3b8;
+  }
+  .branch-line-v {
+    width: 2px;
+    height: 16px;
+    background: #94a3b8;
+    position: relative;
+  }
+  .branch-line-v::after {
+    content: '';
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 7px solid #94a3b8;
+  }
+  .branch-label-tag {
+    font-size: 10px;
+    font-weight: 700;
+    color: #475569;
+    margin: 2px 0;
+    letter-spacing: 0.3px;
+  }
+
+  /* ─── Colour themes ─── */
+  /* Blue – user/UI actions */
+  .blue  { background: #dbeafe; color: #1d4ed8; border: 1.5px solid #93c5fd; }
+  /* Green – hardware / physical */
+  .green { background: #dcfce7; color: #166534; border: 1.5px solid #86efac; }
+  /* Orange – ESP32 firmware */
+  .orange { background: #ffedd5; color: #c2410c; border: 1.5px solid #fdba74; }
+  /* Violet – bridge/software */
+  .violet { background: #ede9fe; color: #6d28d9; border: 1.5px solid #c4b5fd; }
+  /* Teal – API / database */
+  .teal  { background: #ccfbf1; color: #0f766e; border: 1.5px solid #5eead4; }
+  /* Red – error/invalid */
+  .red   { background: #fee2e2; color: #b91c1c; border: 1.5px solid #fca5a5; }
+
+  /* swimlane label */
+  .swimlane-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: #94a3b8;
+    margin-bottom: 2px;
+  }
+
+  /* ── Legend ── */
+  .legend {
+    max-width: 1100px;
+    margin: 28px auto 0;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    padding: 16px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    align-items: center;
+  }
+  .legend h3 {
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    width: 100%;
+    margin-bottom: 2px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    color: #334155;
+  }
+  .legend-box {
+    width: 22px;
+    height: 14px;
+    border-radius: 3px;
+  }
+  .legend-diamond {
+    width: 16px;
+    height: 16px;
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+    background: #fef9c3;
+  }
+  .legend-terminal {
+    width: 28px;
+    height: 14px;
+    border-radius: 50px;
+    background: #0f172a;
+  }
+
+  /* ── Full system overview ── */
+  .overview-card {
+    max-width: 1100px;
+    margin: 28px auto 0;
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    padding: 28px 32px;
+  }
+  .overview-card h2 {
+    font-size: 15px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 20px;
+    text-align: center;
+  }
+
+  svg text { font-family: 'Inter', Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="page-title">
+  <h1>ATM Learning System — System Flowchart</h1>
+  <p>Deposit (Cash-In) Flow &nbsp;|&nbsp; Withdrawal (Cash-Out) Flow</p>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!--  MAIN TWO-COLUMN FLOW                                        -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<div class="two-col">
+
+  <!-- ═══════════════  LEFT – DEPOSIT  ═══════════════ -->
+  <div class="flow-card deposit-card">
+    <h2>💳 Parent Cash-In (Deposit) Flow</h2>
+    <div class="fc-row">
+
+      <div class="shape-terminal start">START</div>
+      <div class="arrow"></div>
+
+      <div class="swimlane-label">Dashboard / UI</div>
+      <div class="shape-process blue">Parent opens Dashboard &amp; logs in</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process blue">Select Student Account &amp; tap "Cash-In"</div>
+      <div class="arrow"></div>
+
+      <!-- Decision: cash-in modal -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg blue"></div>
+        <div class="diamond-text">Deposit modal<br>opens?</div>
+      </div>
+
+      <!-- Branch: No → retry -->
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">NO</div>
+          <div class="shape-process red" style="font-size:11px;min-width:110px;">Session error –<br>Reload page</div>
+        </div>
+        <div style="width:2px;height:36px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <!-- Physical action -->
+      <div class="swimlane-label">Physical Layer</div>
+      <div class="shape-process green">Insert coins or bills into ATM slot</div>
+      <div class="arrow"></div>
+
+      <!-- ESP32 -->
+      <div class="swimlane-label">ESP32 Firmware</div>
+      <div class="shape-process orange">Optocoupler detects pulse edges<br><small style="font-size:10px;opacity:0.8;">COIN_PIN 14 / BILL_PIN 32</small></div>
+      <div class="arrow"></div>
+
+      <div class="shape-process orange">Count pulses → map to peso value<br><small style="font-size:10px;opacity:0.8;">Coins: 5p=₱5 10p=₱10 20p=₱20<br>Bills: 5p=₱50 10p=₱100 20p=₱200</small></div>
+      <div class="arrow"></div>
+
+      <!-- Decision: bill routing -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg"></div>
+        <div class="diamond-text">Bill<br>detected?</div>
+      </div>
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+          <div class="shape-process orange" style="font-size:11px;min-width:130px;max-width:140px;">Route bill to<br>storage slot<br>(servo CH0–4)</div>
+        </div>
+        <div style="width:2px;height:60px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">COIN</div>
+          <div class="shape-process orange" style="font-size:11px;min-width:130px;max-width:140px;">Register coin<br>pulse directly</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <div class="shape-process orange">Print <code style="font-size:10px;">DEPOSIT:&lt;amount&gt;</code> to Serial (USB 115200)</div>
+      <div class="arrow"></div>
+
+      <!-- Bridge -->
+      <div class="swimlane-label">Python Serial Bridge</div>
+      <div class="shape-process violet">Bridge reads serial line &amp; parses DEPOSIT tag</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process violet">HTTP POST → <code style="font-size:10px;">/api/deposit</code><br><small style="font-size:10px;opacity:0.8;">{ amount: ₱value }</small></div>
+      <div class="arrow"></div>
+
+      <!-- API / DB -->
+      <div class="swimlane-label">Next.js API + Database</div>
+      <div class="shape-process teal">API validates &amp; credits student balance</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process teal">Transaction record saved to DB</div>
+      <div class="arrow"></div>
+
+      <!-- Dashboard confirm -->
+      <div class="swimlane-label">Dashboard / UI</div>
+      <div class="shape-process blue">Dashboard shows updated balance &amp; success</div>
+      <div class="arrow"></div>
+
+      <!-- Decision: more cash? -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg blue"></div>
+        <div class="diamond-text">Insert more<br>cash?</div>
+      </div>
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+          <div class="shape-process blue" style="font-size:11px;min-width:100px;max-width:120px;">↑ Back to<br>"Insert cash"</div>
+        </div>
+        <div style="width:2px;height:36px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">NO</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <div class="shape-process blue">Parent closes modal / logs out</div>
+      <div class="arrow"></div>
+
+      <div class="shape-terminal end">END</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════  RIGHT – WITHDRAWAL  ═══════════════ -->
+  <div class="flow-card withdraw-card">
+    <h2>🏧 Student Withdrawal (Cash-Out) Flow</h2>
+    <div class="fc-row">
+
+      <div class="shape-terminal start">START</div>
+      <div class="arrow"></div>
+
+      <div class="swimlane-label">Dashboard / UI</div>
+      <div class="shape-process" style="background:#ede9fe;color:#4c1d95;border:1.5px solid #c4b5fd;border-radius:8px;padding:10px 16px;font-size:12.5px;font-weight:500;text-align:center;min-width:220px;max-width:280px;">Student opens Dashboard &amp; enters PIN</div>
+      <div class="arrow"></div>
+
+      <!-- Decision: PIN valid -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg purple"></div>
+        <div class="diamond-text">PIN<br>correct?</div>
+      </div>
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">NO</div>
+          <div class="shape-process red" style="font-size:11px;min-width:110px;">Show error –<br>Retry PIN</div>
+        </div>
+        <div style="width:2px;height:36px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <div class="shape-process violet">Student selects withdrawal amount<br><small style="font-size:10px;opacity:0.8;">₱20 / ₱50 / ₱100 / ₱500 / ₱1000</small></div>
+      <div class="arrow"></div>
+
+      <!-- Decision: sufficient balance -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg purple"></div>
+        <div class="diamond-text">Sufficient<br>balance?</div>
+      </div>
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">NO</div>
+          <div class="shape-process red" style="font-size:11px;min-width:110px;">Show<br>"Insufficient<br>Balance"</div>
+        </div>
+        <div style="width:2px;height:48px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <!-- API -->
+      <div class="swimlane-label">Next.js API + Database</div>
+      <div class="shape-process teal">API queues <code style="font-size:10px;">WITHDRAW &lt;amount&gt;</code> command</div>
+      <div class="arrow"></div>
+
+      <!-- Bridge -->
+      <div class="swimlane-label">Python Serial Bridge</div>
+      <div class="shape-process violet">Bridge polls <code style="font-size:10px;">GET /api/command</code> every 500 ms</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process violet">Bridge writes command to Serial port</div>
+      <div class="arrow"></div>
+
+      <!-- ESP32 -->
+      <div class="swimlane-label">ESP32 Firmware</div>
+      <div class="shape-process orange">Parse <code style="font-size:10px;">WITHDRAW &lt;amount&gt;</code> command</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process orange">Calculate denominations to dispense<br><small style="font-size:10px;opacity:0.8;">Greedy algorithm: 1000→500→100→50→20</small></div>
+      <div class="arrow"></div>
+
+      <div class="shape-process orange">Elevator lifts to slot position<br><small style="font-size:10px;opacity:0.8;">IR5 sensors (GPIO 34/33/25/26/4) confirm position</small></div>
+      <div class="arrow"></div>
+
+      <!-- Decision: bills remaining -->
+      <div class="diamond-wrap">
+        <div class="diamond-bg"></div>
+        <div class="diamond-text">Bills left<br>to dispense?</div>
+      </div>
+      <div class="branch-row">
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">YES</div>
+          <div class="shape-process orange" style="font-size:11px;min-width:130px;max-width:145px;">Spinner reverses<br>(CH0–4) to eject<br>one bill</div>
+        </div>
+        <div style="width:2px;height:60px;background:#94a3b8;"></div>
+        <div class="branch-arm">
+          <div class="branch-line-h"></div>
+          <div class="branch-label-tag">DONE</div>
+        </div>
+      </div>
+      <div class="arrow"></div>
+
+      <!-- Physical -->
+      <div class="swimlane-label">Physical Layer</div>
+      <div class="shape-process green">Elevator delivers bill(s) to output tray</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process orange">ESP32 prints <code style="font-size:10px;">WITHDRAW DONE</code> to Serial</div>
+      <div class="arrow"></div>
+
+      <!-- API deduct -->
+      <div class="swimlane-label">Next.js API + Database</div>
+      <div class="shape-process teal">API deducts amount from student balance</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process teal">Transaction record saved to DB</div>
+      <div class="arrow"></div>
+
+      <!-- Dashboard -->
+      <div class="swimlane-label">Dashboard / UI</div>
+      <div class="shape-process violet">Dashboard shows updated balance &amp; receipt</div>
+      <div class="arrow"></div>
+
+      <div class="shape-process violet">Student collects cash from tray</div>
+      <div class="arrow"></div>
+
+      <div class="shape-terminal end">END</div>
+    </div>
+  </div>
+
+</div><!-- /.two-col -->
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!--  SYSTEM OVERVIEW SVG                                         -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<div class="overview-card">
+  <h2>System Architecture Overview</h2>
+  <svg viewBox="0 0 1040 220" width="100%" style="display:block;">
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+      </marker>
+      <marker id="arr2" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
+        <polygon points="8 0, 0 3, 8 6" fill="#64748b"/>
+      </marker>
+    </defs>
+
+    <!-- Physical Layer box -->
+    <rect x="20" y="60" width="160" height="100" rx="10" fill="#dcfce7" stroke="#86efac" stroke-width="1.5"/>
+    <text x="100" y="82" text-anchor="middle" font-size="11" font-weight="700" fill="#166534">Physical Layer</text>
+    <text x="100" y="100" text-anchor="middle" font-size="10" fill="#166534">Coin Acceptor</text>
+    <text x="100" y="115" text-anchor="middle" font-size="10" fill="#166534">Bill Acceptor</text>
+    <text x="100" y="130" text-anchor="middle" font-size="10" fill="#166534">Spinners (CH0–4)</text>
+    <text x="100" y="145" text-anchor="middle" font-size="10" fill="#166534">Elevator + IR5 Sensors</text>
+
+    <!-- Arrow: Physical → ESP32 -->
+    <line x1="180" y1="110" x2="220" y2="110" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="200" y="105" text-anchor="middle" font-size="9" fill="#64748b">GPIO</text>
+
+    <!-- ESP32 box -->
+    <rect x="220" y="50" width="170" height="120" rx="10" fill="#ffedd5" stroke="#fdba74" stroke-width="1.5"/>
+    <text x="305" y="72" text-anchor="middle" font-size="11" font-weight="700" fill="#c2410c">ESP32 Firmware</text>
+    <text x="305" y="90" text-anchor="middle" font-size="10" fill="#c2410c">Pulse counting &amp; mapping</text>
+    <text x="305" y="105" text-anchor="middle" font-size="10" fill="#c2410c">Bill routing logic</text>
+    <text x="305" y="120" text-anchor="middle" font-size="10" fill="#c2410c">Withdrawal state machine</text>
+    <text x="305" y="135" text-anchor="middle" font-size="10" fill="#c2410c">PCA9685 servo control</text>
+    <text x="305" y="150" text-anchor="middle" font-size="10" fill="#c2410c">Serial print DEPOSIT/DONE</text>
+
+    <!-- Arrow: ESP32 ↔ Bridge (double) -->
+    <line x1="390" y1="100" x2="430" y2="100" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="430" y1="120" x2="390" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <text x="410" y="95" text-anchor="middle" font-size="9" fill="#64748b">TX</text>
+    <text x="410" y="140" text-anchor="middle" font-size="9" fill="#64748b">RX</text>
+
+    <!-- Bridge box -->
+    <rect x="430" y="55" width="175" height="110" rx="10" fill="#ede9fe" stroke="#c4b5fd" stroke-width="1.5"/>
+    <text x="517" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#6d28d9">Python Serial Bridge</text>
+    <text x="517" y="95" text-anchor="middle" font-size="10" fill="#6d28d9">serial_bridge.py</text>
+    <text x="517" y="110" text-anchor="middle" font-size="10" fill="#6d28d9">Reads serial events</text>
+    <text x="517" y="125" text-anchor="middle" font-size="10" fill="#6d28d9">POST /api/deposit</text>
+    <text x="517" y="140" text-anchor="middle" font-size="10" fill="#6d28d9">Poll GET /api/command</text>
+
+    <!-- Arrow: Bridge ↔ API (double) -->
+    <line x1="605" y1="100" x2="645" y2="100" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="645" y1="120" x2="605" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <text x="625" y="95" text-anchor="middle" font-size="9" fill="#64748b">HTTP</text>
+    <text x="625" y="140" text-anchor="middle" font-size="9" fill="#64748b">HTTP</text>
+
+    <!-- Next.js API box -->
+    <rect x="645" y="55" width="175" height="110" rx="10" fill="#ccfbf1" stroke="#5eead4" stroke-width="1.5"/>
+    <text x="732" y="77" text-anchor="middle" font-size="11" font-weight="700" fill="#0f766e">Next.js 14 API</text>
+    <text x="732" y="95" text-anchor="middle" font-size="10" fill="#0f766e">localhost:3001</text>
+    <text x="732" y="110" text-anchor="middle" font-size="10" fill="#0f766e">/api/deposit</text>
+    <text x="732" y="125" text-anchor="middle" font-size="10" fill="#0f766e">/api/command</text>
+    <text x="732" y="140" text-anchor="middle" font-size="10" fill="#0f766e">/api/device</text>
+
+    <!-- Arrow: API ↔ DB -->
+    <line x1="820" y1="100" x2="858" y2="100" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="858" y1="120" x2="820" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr2)"/>
+    <text x="839" y="95" text-anchor="middle" font-size="9" fill="#64748b">R/W</text>
+
+    <!-- Database box -->
+    <rect x="858" y="60" width="130" height="100" rx="10" fill="#e0f2fe" stroke="#7dd3fc" stroke-width="1.5"/>
+    <text x="923" y="82" text-anchor="middle" font-size="11" font-weight="700" fill="#0369a1">Database</text>
+    <text x="923" y="100" text-anchor="middle" font-size="10" fill="#0369a1">Student accounts</text>
+    <text x="923" y="115" text-anchor="middle" font-size="10" fill="#0369a1">Balances</text>
+    <text x="923" y="130" text-anchor="middle" font-size="10" fill="#0369a1">Transactions</text>
+    <text x="923" y="145" text-anchor="middle" font-size="10" fill="#0369a1">PIN / Auth</text>
+
+    <!-- Arrow: API ↔ Dashboard -->
+    <line x1="732" y1="55" x2="732" y2="30" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="752" y1="30" x2="752" y2="55" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- Dashboard label (top) -->
+    <rect x="630" y="5" width="215" height="26" rx="6" fill="#dbeafe" stroke="#93c5fd" stroke-width="1.5"/>
+    <text x="737" y="21" text-anchor="middle" font-size="11" font-weight="700" fill="#1d4ed8">Next.js Dashboard (Browser)</text>
+
+    <!-- Layer labels at bottom -->
+    <text x="100" y="185" text-anchor="middle" font-size="9.5" font-weight="600" fill="#94a3b8">HARDWARE</text>
+    <text x="305" y="185" text-anchor="middle" font-size="9.5" font-weight="600" fill="#94a3b8">FIRMWARE</text>
+    <text x="517" y="185" text-anchor="middle" font-size="9.5" font-weight="600" fill="#94a3b8">MIDDLEWARE</text>
+    <text x="732" y="185" text-anchor="middle" font-size="9.5" font-weight="600" fill="#94a3b8">BACKEND</text>
+    <text x="923" y="185" text-anchor="middle" font-size="9.5" font-weight="600" fill="#94a3b8">STORAGE</text>
+
+    <!-- Divider lines -->
+    <line x1="200" y1="175" x2="200" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+    <line x1="420" y1="175" x2="420" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+    <line x1="630" y1="175" x2="630" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+    <line x1="850" y1="175" x2="850" y2="195" stroke="#e2e8f0" stroke-width="1"/>
+  </svg>
+</div>
+
+<!-- ════════════════════  LEGEND  ════════════════════ -->
+<div class="legend">
+  <h3>Legend</h3>
+  <div class="legend-item"><div class="legend-terminal"></div> Start / End</div>
+  <div class="legend-item"><div class="legend-box blue" style="background:#dbeafe;border:1.5px solid #93c5fd;"></div> Dashboard / UI Action</div>
+  <div class="legend-item"><div class="legend-box" style="background:#dcfce7;border:1.5px solid #86efac;border-radius:3px;"></div> Physical / Hardware</div>
+  <div class="legend-item"><div class="legend-box" style="background:#ffedd5;border:1.5px solid #fdba74;border-radius:3px;"></div> ESP32 Firmware</div>
+  <div class="legend-item"><div class="legend-box" style="background:#ede9fe;border:1.5px solid #c4b5fd;border-radius:3px;"></div> Python Serial Bridge</div>
+  <div class="legend-item"><div class="legend-box" style="background:#ccfbf1;border:1.5px solid #5eead4;border-radius:3px;"></div> API / Database</div>
+  <div class="legend-item"><div class="legend-box" style="background:#fee2e2;border:1.5px solid #fca5a5;border-radius:3px;"></div> Error / Invalid Path</div>
+  <div class="legend-item"><div class="legend-diamond"></div> Decision</div>
+</div>
+
+</body>
+</html>

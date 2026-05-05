@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 
@@ -57,6 +57,7 @@ const STORAGE_KEYS = {
   balance: 'cash_kid_balance',
   instant: 'cash_instant_withdrawals',
   pending: 'cash_pending_withdrawals',
+  approvedPendingIds: 'cash_approved_pending_withdrawal_ids',
   history: 'cash_withdrawal_history',
   kidNotifications: 'cash_kid_notifications',
   kidShowBalance: 'cash_kid_show_balance',
@@ -81,6 +82,15 @@ function safeParse<T>(raw: string | null, fallback: T): T {
   } catch {
     return fallback
   }
+}
+
+function loadApprovedPendingIds(): number[] {
+  return safeParse<number[]>(localStorage.getItem(STORAGE_KEYS.approvedPendingIds), [])
+}
+
+function filterApprovedPending(items: PendingWithdrawal[]): PendingWithdrawal[] {
+  const approved = new Set(loadApprovedPendingIds())
+  return items.filter((item) => !approved.has(item.id))
 }
 
 const PHP_CURRENCY = new Intl.NumberFormat('en-PH', {
@@ -134,10 +144,18 @@ export default function DashboardPage() {
   const [newKidSecurityQuestion, setNewKidSecurityQuestion] = useState("What's your favorite pet?")
   const [newKidSecurityAnswer, setNewKidSecurityAnswer] = useState('')
   const [newKidCustomQuestion, setNewKidCustomQuestion] = useState('')
+  const [pendingDepositKid, setPendingDepositKid] = useState<string | null>(null)
+  const [pendingDepositTarget, setPendingDepositTarget] = useState(0)
+  const [pendingDepositReceived, setPendingDepositReceived] = useState(0)
+  const [pendingDepositError, setPendingDepositError] = useState<string | null>(null)
   const [isHydrated, setIsHydrated] = useState(false)
   const [depositToast, setDepositToast] = useState<string | null>(null)
   const [lastHardwareDepositAt, setLastHardwareDepositAt] = useState<string | null>(null)
   const [lastHardwareDepositAmount, setLastHardwareDepositAmount] = useState<number | null>(null)
+  const [kidDepositModalOpen, setKidDepositModalOpen] = useState(false)
+  const [depositCountdown, setDepositCountdown] = useState(30)
+  const kidLastSeenDepositIdRef = useRef(0)
+  const parentLastSeenDepositIdRef = useRef(0)
 
   const kidGoals = useMemo(() => {
     if (!kidName) return initialKidGoals
@@ -188,7 +206,11 @@ export default function DashboardPage() {
     setKidGoalsByAccount(loadedGoalsByAccount)
 
     setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
-    setPendingWithdrawals(safeParse<PendingWithdrawal[]>(localStorage.getItem(STORAGE_KEYS.pending), []))
+    setPendingWithdrawals(
+      filterApprovedPending(
+        safeParse<PendingWithdrawal[]>(localStorage.getItem(STORAGE_KEYS.pending), [])
+      )
+    )
     setHistory(safeParse<WithdrawalRecord[]>(localStorage.getItem(STORAGE_KEYS.history), defaultHistory))
 
     const storedNotifications = localStorage.getItem(STORAGE_KEYS.kidNotifications)
@@ -239,7 +261,6 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!isHydrated) return
     localStorage.setItem(STORAGE_KEYS.instant, String(instantWithdrawals))
-    localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(pendingWithdrawals))
     localStorage.setItem(STORAGE_KEYS.history, JSON.stringify(history))
     localStorage.setItem(STORAGE_KEYS.kidNotifications, String(kidNotifications))
     localStorage.setItem(STORAGE_KEYS.kidShowBalance, String(kidShowBalance))
@@ -254,7 +275,6 @@ export default function DashboardPage() {
   }, [
     isHydrated,
     instantWithdrawals,
-    pendingWithdrawals,
     history,
     kidNotifications,
     kidShowBalance,
@@ -268,6 +288,26 @@ export default function DashboardPage() {
     kidBalances,
   ])
 
+  // Keep local state in sync across tabs/windows to avoid stale overwrites.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEYS.pending) {
+        setPendingWithdrawals(filterApprovedPending(safeParse<PendingWithdrawal[]>(event.newValue, [])))
+        return
+      }
+      if (event.key === STORAGE_KEYS.history) {
+        setHistory(safeParse<WithdrawalRecord[]>(event.newValue, defaultHistory))
+        return
+      }
+      if (event.key === STORAGE_KEYS.kidBalances) {
+        setKidBalances(safeParse<Record<string, number>>(event.newValue, {}))
+      }
+    }
+
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
   useEffect(() => {
     if (!isHydrated) return
     if (role !== 'kid' || !kidName) return
@@ -277,6 +317,14 @@ export default function DashboardPage() {
       return { ...prev, [kidName]: balance }
     })
   }, [isHydrated, role, kidName, balance])
+
+  // Keep kid UI balance aligned with the authoritative per-account balance map.
+  useEffect(() => {
+    if (!isHydrated) return
+    if (role !== 'kid' || !kidName) return
+    const mapped = kidBalances[kidName] ?? 0
+    setBalance((prev) => (prev === mapped ? prev : mapped))
+  }, [isHydrated, role, kidName, kidBalances])
 
   useEffect(() => {
     if (role === 'kid' && activeMenu === 'settings') {
@@ -311,58 +359,150 @@ export default function DashboardPage() {
     return () => controller.abort()
   }, [isHydrated, role, kidName, balance])
 
-  // Poll the deposit API every 2 seconds for the active kid dashboard only.
-  // This avoids other tabs/sessions consuming and discarding hardware deposits.
+  // Poll for hardware deposits only while the kid deposit modal is open.
   useEffect(() => {
-    if (!isHydrated || role !== 'kid' || !kidName) return
+    if (!isHydrated || role !== 'kid' || !kidName || !kidDepositModalOpen) return
 
     let cancelled = false
     const pollDeposits = async () => {
       try {
-        const res = await fetch('/api/deposit?consume=true', { cache: 'no-store' })
+        const res = await fetch(`/api/deposit?since=${kidLastSeenDepositIdRef.current}`, { cache: 'no-store' })
         if (!res.ok) return
         const data = await res.json() as { deposits: { id: number; amount: number }[] }
         if (!data.deposits || data.deposits.length === 0) return
-        const total = Math.round(data.deposits.reduce((sum, d) => sum + d.amount, 0) * 100) / 100
-        if (cancelled) return
-
-        const hardwareEvents: WithdrawalRecord[] = data.deposits.map((d, index) => ({
-          id: Date.now() + index,
-          child: kidName,
-          amount: Math.round(d.amount * 100) / 100,
-          note: d.amount >= 0 ? 'Hardware deposit' : 'Hardware deduction',
-          when: 'Just now',
-          kind: 'hardware',
-        }))
-
-        setBalance((prev) => Math.round((prev + total) * 100) / 100)
-        setHistory((prev) => [...hardwareEvents.reverse(), ...prev])
-        setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
-        setLastHardwareDepositAmount(total)
-        setDepositToast(
-          total >= 0
-            ? `+${formatPHP(total)} deposited!`
-            : `${formatPHP(total)} deducted!`
+        kidLastSeenDepositIdRef.current = Math.max(
+          kidLastSeenDepositIdRef.current,
+          ...data.deposits.map((d) => d.id)
         )
-        setTimeout(() => setDepositToast(null), 4000)
+        const total = Math.round(data.deposits.filter((d) => d.amount > 0).reduce((sum, d) => sum + d.amount, 0) * 100) / 100
+        if (total > 0 && !cancelled) {
+          setPendingDepositReceived((prev) => Math.round((prev + total) * 100) / 100)
+          setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
+          setLastHardwareDepositAmount(total)
+          setDepositCountdown(30)
+        }
       } catch {
-        // Silently ignore network errors (e.g. server not running)
+        // Silently ignore network errors
       }
     }
 
     void pollDeposits()
-    const interval = setInterval(() => {
-      void pollDeposits()
-    }, 2000)
+    const interval = setInterval(() => { void pollDeposits() }, 350)
 
     return () => {
       cancelled = true
       clearInterval(interval)
     }
-  }, [isHydrated, role, kidName])
+  }, [isHydrated, role, kidName, kidDepositModalOpen])
+
+  // Parent-supervised deposit mode: accumulate cash-in while session is active.
+  useEffect(() => {
+    if (!isHydrated || role !== 'parent' || !pendingDepositKid) return
+
+    let cancelled = false
+    const pollDeposits = async () => {
+      try {
+        const res = await fetch(`/api/deposit?since=${parentLastSeenDepositIdRef.current}`, { cache: 'no-store' })
+        if (!res.ok) return
+        const data = await res.json() as { deposits: { id: number; amount: number }[] }
+        if (!data.deposits || data.deposits.length === 0 || cancelled) return
+        parentLastSeenDepositIdRef.current = Math.max(
+          parentLastSeenDepositIdRef.current,
+          ...data.deposits.map((d) => d.id)
+        )
+
+        const total = Math.round(
+          data.deposits
+            .filter((d) => Number.isFinite(d.amount) && d.amount > 0)
+            .reduce((sum, d) => sum + d.amount, 0) * 100
+        ) / 100
+
+        if (total > 0) {
+          setPendingDepositReceived((prev) => Math.round((prev + total) * 100) / 100)
+          setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
+          setLastHardwareDepositAmount(total)
+          setPendingDepositError(null)
+          setDepositCountdown(30)
+        }
+      } catch {
+        if (!cancelled) {
+          setPendingDepositError('Waiting for hardware bridge...')
+        }
+      }
+    }
+
+    void pollDeposits()
+    const interval = setInterval(() => { void pollDeposits() }, 300)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isHydrated, role, pendingDepositKid])
+
+  // Countdown tick — decrements every second while a deposit session is active.
+  useEffect(() => {
+    const sessionActive = kidDepositModalOpen || pendingDepositKid !== null
+    if (!sessionActive || depositCountdown <= 0) return
+    const t = setTimeout(() => setDepositCountdown((c) => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [kidDepositModalOpen, pendingDepositKid, depositCountdown])
+
+  // Commit deposit when countdown reaches zero.
+  useEffect(() => {
+    if (depositCountdown !== 0) return
+
+    if (kidDepositModalOpen) {
+      if (pendingDepositReceived > 0) {
+        const credited = Math.round(pendingDepositReceived * 100) / 100
+        setBalance((prev) => Math.round((prev + credited) * 100) / 100)
+        setHistory((prev) => [
+          {
+            id: Date.now(),
+            child: kidName,
+            amount: credited,
+            note: 'Hardware deposit',
+            when: 'Just now',
+            kind: 'hardware',
+          },
+          ...prev,
+        ])
+        setDepositToast(`+${formatPHP(credited)} deposited!`)
+        setTimeout(() => setDepositToast(null), 4000)
+      }
+      setPendingDepositReceived(0)
+      setKidDepositModalOpen(false)
+    } else if (pendingDepositKid) {
+      if (pendingDepositReceived > 0) {
+        const credited = Math.round(pendingDepositReceived * 100) / 100
+        setKidBalances((prev) => ({
+          ...prev,
+          [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
+        }))
+        setHistory((prev) => [
+          {
+            id: Date.now(),
+            child: pendingDepositKid,
+            amount: credited,
+            note: 'Hardware deposit (parent confirmation)',
+            when: 'Just now',
+            kind: 'hardware',
+          },
+          ...prev,
+        ])
+        setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
+        setTimeout(() => setDepositToast(null), 4000)
+      }
+      setPendingDepositKid(null)
+      setPendingDepositReceived(0)
+      setPendingDepositError(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositCountdown])
 
   const visibleMenuItems = role === 'kid' ? menuItems.filter((item) => item.key !== 'settings') : menuItems
 
+  // Only 20, 50, 100, 500, 1000 PHP bills are stocked.
   const canWithdraw = useMemo(() => {
     const amount = Number(withdrawAmount)
     const noteOk = !kidRequireNote || withdrawNote.trim().length >= 3
@@ -476,17 +616,27 @@ export default function DashboardPage() {
         },
         ...prev,
       ])
+      // Trigger machine to dispense the bills.
+      void fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: `WITHDRAW ${Math.round(amount)}` }),
+      })
     } else {
-      setPendingWithdrawals((prev) => [
-        {
-          id: Date.now(),
-          child: kidName,
-          amount,
-          note,
-          createdAt: 'Just now',
-        },
-        ...prev,
-      ])
+      setPendingWithdrawals((prev) => {
+        const next = [
+          {
+            id: Date.now(),
+            child: kidName,
+            amount,
+            note,
+            createdAt: 'Just now',
+          },
+          ...prev,
+        ]
+        localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
+        return next
+      })
     }
 
     resetWithdrawForm()
@@ -513,11 +663,73 @@ export default function DashboardPage() {
       },
       ...prev,
     ])
-    setPendingWithdrawals((prev) => prev.filter((item) => item.id !== id))
+    setPendingWithdrawals((prev) => {
+      const next = prev.filter((item) => item.id !== id)
+      localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
+      return next
+    })
+    const approved = loadApprovedPendingIds()
+    const mergedApproved = [...approved, id].slice(-300)
+    localStorage.setItem(STORAGE_KEYS.approvedPendingIds, JSON.stringify(mergedApproved))
+    // Trigger machine to dispense the approved bills.
+    void fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: `WITHDRAW ${Math.round(request.amount)}` }),
+    })
   }
 
   const declinePending = (id: number) => {
-    setPendingWithdrawals((prev) => prev.filter((item) => item.id !== id))
+      setPendingWithdrawals((prev) => {
+        const next = prev.filter((item) => item.id !== id)
+        localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
+        return next
+      })
+  }
+
+  const startParentDepositFlow = (username: string) => {
+    // Flush any stale deposits from a previous session before starting a new one.
+    void fetch('/api/deposit/clear', { method: 'POST' })
+    parentLastSeenDepositIdRef.current = 0
+
+    setPendingDepositKid(username)
+    setPendingDepositTarget(0)
+    setPendingDepositReceived(0)
+    setPendingDepositError(null)
+    setDepositCountdown(30)
+  }
+
+  const cancelParentDepositFlow = () => {
+    parentLastSeenDepositIdRef.current = 0
+    setPendingDepositKid(null)
+    setPendingDepositTarget(0)
+    setPendingDepositReceived(0)
+    setPendingDepositError(null)
+    setDepositCountdown(30)
+  }
+
+  const applyParentReceivedDeposit = () => {
+    if (!pendingDepositKid || pendingDepositReceived <= 0) return
+
+    const credited = Math.round(pendingDepositReceived * 100) / 100
+    setKidBalances((prev) => ({
+      ...prev,
+      [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
+    }))
+    setHistory((prev) => [
+      {
+        id: Date.now(),
+        child: pendingDepositKid,
+        amount: credited,
+        note: 'Hardware deposit (manual confirmation)',
+        when: 'Just now',
+        kind: 'hardware',
+      },
+      ...prev,
+    ])
+    setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
+    setTimeout(() => setDepositToast(null), 4000)
+    cancelParentDepositFlow()
   }
 
   const handleAddGoal = (e: React.FormEvent) => {
@@ -558,13 +770,26 @@ export default function DashboardPage() {
         <h2 className="text-2xl sm:text-5xl font-sora font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500 mt-1 break-words">
           {kidShowBalance ? formatPHP(balance) : '•••••'}
         </h2>
-        <p className="text-gray-600 font-inter mt-2">Deposits are handled by the machine automatically.</p>
-        <p className="text-xs text-gray-600 font-inter mt-2">
-          Hardware deposit status:{' '}
-          {lastHardwareDepositAt && lastHardwareDepositAmount !== null
-            ? `Last received ${formatPHP(lastHardwareDepositAmount)} at ${lastHardwareDepositAt}`
-            : 'Waiting for first hardware event'}
-        </p>
+        <div className="flex items-center justify-between mt-3 flex-wrap gap-3">
+          <p className="text-xs text-gray-500 font-inter">
+            {lastHardwareDepositAt && lastHardwareDepositAmount !== null
+              ? `Last received ${formatPHP(lastHardwareDepositAmount)} at ${lastHardwareDepositAt}`
+              : 'No hardware deposit yet'}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              void fetch('/api/deposit/clear', { method: 'POST' })
+              kidLastSeenDepositIdRef.current = 0
+              setPendingDepositReceived(0)
+              setDepositCountdown(30)
+              setKidDepositModalOpen(true)
+            }}
+            className="rounded-2xl bg-gradient-to-r from-emerald-500 via-green-500 to-lime-500 text-white px-8 py-4 font-inter font-extrabold text-lg uppercase tracking-widest shadow-xl shadow-emerald-300/60 ring-2 ring-emerald-200 animate-pulse hover:scale-105 hover:animate-none active:scale-95 transition"
+          >
+            💰 Deposit Cash
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
@@ -1014,29 +1239,14 @@ export default function DashboardPage() {
               {validKidAccounts.map((username) => (
                 <div key={username} className="bg-white/70 rounded-xl p-4">
                   <p className="font-inter font-semibold text-gray-800 mb-2">Add Money to {username}</p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const amount = prompt(`How much would you like to add to ${username}'s account?`)
-                        if (amount) {
-                          const parsedAmount = parseFloat(amount)
-                          if (parsedAmount > 0 && !isNaN(parsedAmount)) {
-                            setKidBalances(prev => ({
-                              ...prev,
-                              [username]: (prev[username] || 0) + parsedAmount
-                            }))
-                            alert(`✅ Added ${formatPHP(parsedAmount)} to ${username}'s account!`)
-                          } else {
-                            alert('❌ Invalid amount')
-                          }
-                        }
-                      }}
-                      className="flex-1 px-4 py-2 rounded-lg bg-gradient-to-r from-green-600 to-green-500 text-white font-inter font-semibold hover:shadow-lg transition-all"
-                    >
-                      💰 Deposit
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => startParentDepositFlow(username)}
+                    disabled={pendingDepositKid !== null}
+                    className="w-full px-4 py-2 rounded-lg bg-gradient-to-r from-green-600 to-green-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    💰 Deposit
+                  </button>
                 </div>
               ))}
             </div>
@@ -1613,6 +1823,89 @@ export default function DashboardPage() {
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-green-500 text-white px-4 py-3 sm:px-6 sm:py-4 rounded-2xl shadow-2xl font-sora font-bold text-sm sm:text-xl flex items-center gap-2 sm:gap-3 animate-bounce max-w-[90vw] text-center">
           <span>💰</span>
           <span>{depositToast}</span>
+        </div>
+      )}
+
+        {role === 'kid' && kidDepositModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl p-6 space-y-4">
+              <h3 className="text-2xl font-sora font-bold text-green-700">Deposit Cash</h3>
+              <p className="font-inter text-gray-700">
+                Insert coins or bills into the acceptor. The timer resets with each coin or bill detected.
+              </p>
+
+              <div className="flex items-center justify-center">
+                <div className={`text-6xl font-sora font-black ${
+                  depositCountdown <= 5 ? 'text-red-500' : depositCountdown <= 10 ? 'text-amber-500' : 'text-green-600'
+                }`}>{depositCountdown}s</div>
+              </div>
+
+              <div className="bg-green-50 rounded-xl p-4 space-y-2 font-inter text-gray-800">
+                <p>Collected so far: <span className="font-semibold text-green-700">{formatPHP(pendingDepositReceived)}</span></p>
+                <p>Current Balance: <span className="font-semibold">{formatPHP(balance)}</span></p>
+              </div>
+
+              <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
+                <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                {pendingDepositReceived > 0 ? 'Money detected — keep inserting or wait for timer.' : 'Waiting for coins or bills…'}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingDepositReceived(0)
+                  setKidDepositModalOpen(false)
+                }}
+                className="w-full rounded-xl bg-gray-200 text-gray-800 px-4 py-2 font-inter font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+      {role === 'parent' && pendingDepositKid && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl p-6 space-y-4">
+            <h3 className="text-2xl font-sora font-bold text-blue-700">Cash-In for {pendingDepositKid}</h3>
+            <p className="font-inter text-gray-700">
+              Insert coins or bills into the acceptor. The timer resets with each coin or bill detected.
+            </p>
+
+            <div className="flex items-center justify-center">
+              <div className={`text-6xl font-sora font-black ${
+                depositCountdown <= 5 ? 'text-red-500' : depositCountdown <= 10 ? 'text-amber-500' : 'text-blue-600'
+              }`}>{depositCountdown}s</div>
+            </div>
+
+            <div className="bg-blue-50 rounded-xl p-4 space-y-2 font-inter text-gray-800">
+              <p>Collected so far: <span className="font-semibold text-blue-700">{formatPHP(pendingDepositReceived)}</span></p>
+              {pendingDepositError && <p className="text-amber-700 text-sm">{pendingDepositError}</p>}
+            </div>
+
+            <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
+              <span className="inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+              {pendingDepositReceived > 0 ? 'Money detected — keep inserting or wait for timer.' : 'Waiting for coins or bills…'}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2 pt-1">
+              <button
+                type="button"
+                onClick={applyParentReceivedDeposit}
+                disabled={pendingDepositReceived <= 0}
+                className="flex-1 rounded-xl bg-emerald-600 text-white px-4 py-2 font-inter font-semibold disabled:opacity-50"
+              >
+                Apply Now
+              </button>
+              <button
+                type="button"
+                onClick={cancelParentDepositFlow}
+                className="flex-1 rounded-xl bg-gray-200 text-gray-800 px-4 py-2 font-inter font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

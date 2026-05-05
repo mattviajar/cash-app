@@ -1,0 +1,193 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>ATM Learning System — Block Diagram</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;font-family:'Segoe UI',sans-serif;color:#e2e8f0;padding:30px 20px 60px}
+h1{text-align:center;font-size:1.35rem;font-weight:700;color:#93c5fd;margin-bottom:4px}
+.subtitle{text-align:center;font-size:.72rem;color:#475569;margin-bottom:30px}
+.canvas{display:grid;grid-template-columns:300px 80px 260px 80px 280px;max-width:1100px;margin:0 auto;align-items:start}
+.panel{border-radius:12px;padding:14px 12px;display:flex;flex-direction:column;gap:8px}
+.hw{background:#12181f;border:2px solid #334155}.sw{background:#0f1c10;border:2px solid #1a4a25}.web{background:#0e0e22;border:2px solid #2a2870}
+.panel-title{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;text-align:center;padding-bottom:8px;margin-bottom:2px;border-bottom:1px solid #1e293b}
+.hw .panel-title{color:#f59e0b}.sw .panel-title{color:#34d399}.web .panel-title{color:#818cf8}
+.box{border-radius:8px;padding:8px 10px;text-align:center;font-size:.68rem;line-height:1.4}
+.box b{display:block;font-size:.72rem;margin-bottom:1px}.box small{font-size:.6rem;color:#94a3b8}
+.b-input{background:#0d2035;border:1.5px solid #0ea5e9;color:#7dd3fc}
+.b-esp{background:#0e2010;border:1.5px solid #22c55e;color:#86efac}
+.b-pca{background:#1e1408;border:1.5px solid #f59e0b;color:#fcd34d}
+.b-sensor{background:#13103a;border:1.5px solid #a78bfa;color:#c4b5fd}
+.b-uno{background:#0e1525;border:1.5px solid #60a5fa;color:#93c5fd}
+.b-motor{background:#1e1108;border:1.5px solid #f97316;color:#fdba74}
+.b-bridge{background:#081a0e;border:1.5px solid #34d399;color:#6ee7b7}
+.b-api{background:#08131e;border:1.5px solid #38bdf8;color:#7dd3fc}
+.b-dash{background:#10102e;border:1.5px solid #818cf8;color:#c7d2fe}
+.b-role{background:#140c30;border:1.5px solid #a78bfa;color:#ddd6fe}
+.b-browser{background:#090920;border:2px solid #6366f1;color:#a5b4fc}
+.group{border-radius:8px;border:1px dashed #1e293b;padding:9px 8px;display:flex;flex-direction:column;gap:6px}
+.group-lbl{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:#475569}
+.row{display:flex;gap:6px}.row>.box{flex:1}
+.conn{display:flex;flex-direction:column;align-items:center;justify-content:center}
+.legend{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:24px;max-width:1100px;margin-left:auto;margin-right:auto}
+.leg{display:flex;align-items:center;gap:5px;font-size:.62rem;color:#94a3b8}
+.dot{width:12px;height:12px;border-radius:3px;border:2px solid;flex-shrink:0}
+</style>
+</head>
+<body>
+<h1>ATM Learning System — Block Diagram</h1>
+<p class="subtitle">Hardware Layer &middot; Serial Bridge &middot; Next.js Web App</p>
+<div class="canvas">
+
+<!-- COL 1: HARDWARE -->
+<div class="panel hw">
+  <div class="panel-title">&#9881; Hardware Layer</div>
+  <div class="group">
+    <span class="group-lbl">Input Devices</span>
+    <div class="row">
+      <div class="box b-input"><b>Coin Slot</b><small>GPIO 14 &middot; Pull-up<br>CH-926 Acceptor</small></div>
+      <div class="box b-input"><b>Bill Acceptor</b><small>GPIO 32 &middot; Pull-up<br>Pulse output</small></div>
+    </div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">ESP32 Controller</span>
+    <div class="box b-esp"><b>Pulse Decoder</b><small>coin &amp; bill pulse counting &middot; idle-gap finalization</small></div>
+    <div class="box b-esp"><b>Bill Router</b><small>elevator state machine &middot; IR5 position feedback</small></div>
+    <div class="box b-esp"><b>Withdraw Job</b><small>bill decomposition &middot; coin remainder payout</small></div>
+    <div class="box b-esp"><b>USB Serial Output</b><small>DEPOSIT: / EVENT lines via COM5</small></div>
+    <div class="box b-esp"><b>UART Bridge</b><small>GPIO 16 RX / 17 TX &rarr; Arduino Uno</small></div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">PCA9685 Servo Driver (I&sup2;C 0x40)</span>
+    <div class="row">
+      <div class="box b-pca"><b>CH0&ndash;4</b><small>Storage<br>Spinners</small></div>
+      <div class="box b-pca"><b>CH5</b><small>Elevator<br>Lift</small></div>
+      <div class="box b-pca"><b>CH6</b><small>Elevator<br>Output</small></div>
+    </div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">Position Sensors</span>
+    <div class="row">
+      <div class="box b-sensor"><b>IR5-1</b><small>GPIO 34</small></div>
+      <div class="box b-sensor"><b>IR5-2</b><small>GPIO 33</small></div>
+      <div class="box b-sensor"><b>IR5-3</b><small>GPIO 25</small></div>
+      <div class="box b-sensor"><b>IR5-4</b><small>GPIO 26</small></div>
+      <div class="box b-sensor"><b>IR5-5</b><small>GPIO 4</small></div>
+    </div>
+    <div class="box b-sensor"><b>IR4 &mdash; Coin Dispense Detect</b><small>GPIO 27</small></div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">Arduino Uno &mdash; Motor Coprocessor</span>
+    <div class="row">
+      <div class="box b-uno"><b>Motor 1</b><small>PHP 1<br>Stepper</small></div>
+      <div class="box b-uno"><b>Motor 2</b><small>PHP 5<br>Stepper</small></div>
+      <div class="box b-uno"><b>Motor 3</b><small>PHP 10<br>Stepper</small></div>
+      <div class="box b-motor"><b>Motor 4</b><small>PHP 20<br>ESP32 direct<br>GPIO 18/19/23/13</small></div>
+    </div>
+  </div>
+</div>
+
+<!-- CONNECTOR 1 -->
+<div class="conn">
+<svg width="80" height="700" viewBox="0 0 80 700" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="a1" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#64748b"/></marker>
+    <marker id="a2" markerWidth="8" markerHeight="6" refX="1" refY="3" orient="auto"><polygon points="8,0 0,3 8,6" fill="#64748b"/></marker>
+    <marker id="a3" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#f97316"/></marker>
+    <marker id="a4" markerWidth="8" markerHeight="6" refX="1" refY="3" orient="auto"><polygon points="8,0 0,3 8,6" fill="#f97316"/></marker>
+  </defs>
+  <!-- USB Serial out -->
+  <line x1="2" y1="220" x2="72" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#a1)"/>
+  <text x="40" y="214" fill="#64748b" font-size="9" text-anchor="middle" font-family="Segoe UI">USB COM5</text>
+  <!-- WITHDRAW cmd back -->
+  <line x1="72" y1="270" x2="2" y2="270" stroke="#f97316" stroke-width="2" marker-end="url(#a2)"/>
+  <text x="40" y="286" fill="#f97316" font-size="9" text-anchor="middle" font-family="Segoe UI">WITHDRAW</text>
+  <text x="40" y="296" fill="#f97316" font-size="9" text-anchor="middle" font-family="Segoe UI">command</text>
+  <!-- UART label -->
+  <text x="40" y="580" fill="#475569" font-size="9" text-anchor="middle" font-family="Segoe UI">UART</text>
+  <text x="40" y="590" fill="#475569" font-size="9" text-anchor="middle" font-family="Segoe UI">internal</text>
+</svg>
+</div>
+
+<!-- COL 2: BRIDGE + API -->
+<div class="panel sw">
+  <div class="panel-title">&#9889; Software Layer (Host PC)</div>
+  <div class="group">
+    <span class="group-lbl">Python Serial Bridge &middot; serial_bridge.py</span>
+    <div class="box b-bridge"><b>Read Serial COM5</b><small>Listen @ 115200 baud &middot; parse DEPOSIT: lines</small></div>
+    <div class="box b-bridge"><b>POST &rarr; /api/deposit</b><small>Forward amount to Next.js deposit queue</small></div>
+    <div class="box b-bridge"><b>GET &rarr; /api/command</b><small>Poll for WITHDRAW cmd &middot; write back to ESP32</small></div>
+  </div>
+  <div class="group" style="margin-top:10px">
+    <span class="group-lbl">Next.js API Routes &middot; port 3001</span>
+    <div class="box b-api"><b>/api/deposit</b><small>POST &mdash; enqueue deposit event<br>GET ?consume=true &mdash; drain queue</small></div>
+    <div class="box b-api"><b>/api/command</b><small>POST &mdash; enqueue WITHDRAW cmd<br>GET ?consume=true &mdash; drain queue</small></div>
+  </div>
+</div>
+
+<!-- CONNECTOR 2 -->
+<div class="conn">
+<svg width="80" height="700" viewBox="0 0 80 700" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="b1" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#34d399"/></marker>
+    <marker id="b2" markerWidth="8" markerHeight="6" refX="1" refY="3" orient="auto"><polygon points="8,0 0,3 8,6" fill="#f97316"/></marker>
+    <marker id="b3" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#818cf8"/></marker>
+    <marker id="b4" markerWidth="8" markerHeight="6" refX="1" refY="3" orient="auto"><polygon points="8,0 0,3 8,6" fill="#818cf8"/></marker>
+  </defs>
+  <!-- deposit event -->
+  <line x1="2" y1="150" x2="72" y2="150" stroke="#34d399" stroke-width="2" marker-end="url(#b1)"/>
+  <text x="40" y="144" fill="#34d399" font-size="9" text-anchor="middle" font-family="Segoe UI">deposit</text>
+  <text x="40" y="154" fill="#34d399" font-size="9" text-anchor="middle" font-family="Segoe UI">event</text>
+  <!-- approve cmd -->
+  <line x1="72" y1="240" x2="2" y2="240" stroke="#f97316" stroke-width="2" marker-end="url(#b2)"/>
+  <text x="40" y="256" fill="#f97316" font-size="9" text-anchor="middle" font-family="Segoe UI">approve</text>
+  <text x="40" y="266" fill="#f97316" font-size="9" text-anchor="middle" font-family="Segoe UI">&rarr; cmd</text>
+  <!-- Browser requests (bidirectional) -->
+  <line x1="2" y1="560" x2="72" y2="560" stroke="#818cf8" stroke-width="2" marker-end="url(#b3)"/>
+  <line x1="72" y1="580" x2="2" y2="580" stroke="#818cf8" stroke-width="2" marker-end="url(#b4)"/>
+  <text x="40" y="598" fill="#818cf8" font-size="9" text-anchor="middle" font-family="Segoe UI">HTTP</text>
+  <text x="40" y="608" fill="#818cf8" font-size="9" text-anchor="middle" font-family="Segoe UI">LAN Wi-Fi</text>
+</svg>
+</div>
+
+<!-- COL 3: WEB APP -->
+<div class="panel web">
+  <div class="panel-title">&#127760; Web App Layer</div>
+  <div class="group">
+    <span class="group-lbl">Dashboard &middot; page.tsx</span>
+    <div class="box b-dash"><b>Dashboard</b><small>Polls /api/deposit every 1.5s<br>Polls /api/command for status</small></div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">Kid View</span>
+    <div class="box b-role"><b>Balance &amp; History</b><small>View balance &middot; goals &middot; transaction history</small></div>
+    <div class="box b-role"><b>Withdrawal Request</b><small>Submit amount &middot; awaits parent approval</small></div>
+  </div>
+  <div class="group">
+    <span class="group-lbl">Parent View</span>
+    <div class="box b-role"><b>Cash-In (Deposit)</b><small>Set target &middot; insert coins/bills<br>Auto or manual confirm</small></div>
+    <div class="box b-role"><b>Approve Withdrawal</b><small>Review requests<br>Approve &rarr; triggers WITHDRAW cmd</small></div>
+    <div class="box b-role"><b>Account Management</b><small>Kid accounts &middot; limits &middot; audit log</small></div>
+  </div>
+  <div class="group" style="margin-top:8px">
+    <span class="group-lbl">Any Device on LAN Wi-Fi</span>
+    <div class="box b-browser"><b>&#127760; Browser</b><small>http://&lt;host-ip&gt;:3001<br>Phone &middot; Tablet &middot; Laptop</small></div>
+  </div>
+</div>
+
+</div>
+
+<div class="legend">
+  <div class="leg"><div class="dot" style="border-color:#0ea5e9;background:#0d2035"></div>Input Device</div>
+  <div class="leg"><div class="dot" style="border-color:#22c55e;background:#0e2010"></div>ESP32 Logic</div>
+  <div class="leg"><div class="dot" style="border-color:#f59e0b;background:#1e1408"></div>PCA9685 Servo</div>
+  <div class="leg"><div class="dot" style="border-color:#a78bfa;background:#13103a"></div>IR Sensor</div>
+  <div class="leg"><div class="dot" style="border-color:#60a5fa;background:#0e1525"></div>Arduino Uno</div>
+  <div class="leg"><div class="dot" style="border-color:#f97316;background:#1e1108"></div>Stepper Motor</div>
+  <div class="leg"><div class="dot" style="border-color:#34d399;background:#081a0e"></div>Serial Bridge</div>
+  <div class="leg"><div class="dot" style="border-color:#38bdf8;background:#08131e"></div>API Route</div>
+  <div class="leg"><div class="dot" style="border-color:#818cf8;background:#10102e"></div>Dashboard</div>
+  <div class="leg"><div class="dot" style="border-color:#6366f1;background:#090920"></div>Browser Client</div>
+</div>
+</body>
+</html>

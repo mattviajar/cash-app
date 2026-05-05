@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ATM Learning System – Schematic Diagram</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #fff; font-family: Arial, sans-serif; }
+  svg { display: block; }
+  @media print {
+    body { margin: 0; }
+    svg { width: 100vw; height: auto; }
+  }
+</style>
+</head>
+<body>
+<svg
+  id="schematic"
+  viewBox="0 0 1400 980"
+  width="1400"
+  height="980"
+  xmlns="http://www.w3.org/2000/svg"
+  style="background:#fff;"
+>
+<defs>
+  <!-- Arrowhead -->
+  <marker id="ah" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 7 2.5, 0 5" fill="#222"/>
+  </marker>
+  <!-- Small arrowhead for signal lines -->
+  <marker id="ahs" markerWidth="5" markerHeight="4" refX="5" refY="2" orient="auto">
+    <polygon points="0 0, 5 2, 0 4" fill="#444"/>
+  </marker>
+  <!-- GND symbol -->
+  <symbol id="gnd" viewBox="-10 0 20 16">
+    <line x1="0" y1="0" x2="0" y2="6" stroke="#222" stroke-width="1.5"/>
+    <line x1="-8" y1="6" x2="8" y2="6" stroke="#222" stroke-width="1.5"/>
+    <line x1="-5" y1="9" x2="5" y2="9" stroke="#222" stroke-width="1.5"/>
+    <line x1="-2" y1="12" x2="2" y2="12" stroke="#222" stroke-width="1.5"/>
+  </symbol>
+  <!-- VCC symbol -->
+  <symbol id="vcc" viewBox="-8 0 16 14">
+    <line x1="0" y1="14" x2="0" y2="6" stroke="#222" stroke-width="1.5"/>
+    <polygon points="0,0 -6,8 6,8" fill="none" stroke="#222" stroke-width="1.5"/>
+  </symbol>
+  <!-- 5V rail symbol -->
+  <symbol id="v5" viewBox="-8 0 16 14">
+    <line x1="0" y1="14" x2="0" y2="6" stroke="#c00" stroke-width="1.5"/>
+    <polygon points="0,0 -6,8 6,8" fill="none" stroke="#c00" stroke-width="1.5"/>
+  </symbol>
+  <!-- Resistor (IEEE zigzag) -->
+  <symbol id="res" viewBox="0 0 40 12">
+    <polyline points="0,6 4,6 6,1 10,11 14,1 18,11 22,1 26,11 30,1 34,11 36,6 40,6"
+      fill="none" stroke="#222" stroke-width="1.5"/>
+  </symbol>
+  <!-- Capacitor -->
+  <symbol id="cap" viewBox="0 0 20 20">
+    <line x1="10" y1="0" x2="10" y2="8" stroke="#222" stroke-width="1.5"/>
+    <line x1="2"  y1="8" x2="18" y2="8" stroke="#222" stroke-width="2"/>
+    <line x1="2"  y1="12" x2="18" y2="12" stroke="#222" stroke-width="2"/>
+    <line x1="10" y1="12" x2="10" y2="20" stroke="#222" stroke-width="1.5"/>
+  </symbol>
+</defs>
+
+<!-- ══════════════════════════════════════════════════════════
+     BORDER
+═══════════════════════════════════════════════════════════ -->
+<rect x="5" y="5" width="1390" height="970" fill="none" stroke="#222" stroke-width="2.5"/>
+<!-- inner thin border -->
+<rect x="12" y="12" width="1376" height="956" fill="none" stroke="#222" stroke-width="0.8"/>
+
+<!-- ══════════════════════════════════════════════════════════
+     COLOUR-CODED ZONE BACKGROUNDS
+═══════════════════════════════════════════════════════════ -->
+<!-- ESP32 zone -->
+<rect x="30" y="30" width="320" height="760" rx="6" fill="#fff8f0" stroke="#fdba74" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="190" y="50" text-anchor="middle" font-size="10" fill="#c2410c" font-weight="bold" letter-spacing="1">ESP32-WROOM-32</text>
+
+<!-- PCA9685 zone -->
+<rect x="380" y="30" width="240" height="370" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="500" y="50" text-anchor="middle" font-size="10" fill="#166534" font-weight="bold" letter-spacing="1">PCA9685 (I²C SERVO DRIVER)</text>
+
+<!-- Servo zone -->
+<rect x="650" y="30" width="250" height="370" rx="6" fill="#f8faff" stroke="#93c5fd" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="775" y="50" text-anchor="middle" font-size="10" fill="#1d4ed8" font-weight="bold" letter-spacing="1">SERVO MOTORS (360°)</text>
+
+<!-- IR sensor zone -->
+<rect x="380" y="430" width="240" height="350" rx="6" fill="#fef9c3" stroke="#fde047" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="500" y="450" text-anchor="middle" font-size="10" fill="#854d0e" font-weight="bold" letter-spacing="1">IR SENSORS (TCRT5000)</text>
+
+<!-- Stepper zone -->
+<rect x="650" y="430" width="250" height="180" rx="6" fill="#fdf4ff" stroke="#d8b4fe" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="775" y="450" text-anchor="middle" font-size="10" fill="#7c3aed" font-weight="bold" letter-spacing="1">STEPPER MOTOR (28BYJ-48)</text>
+
+<!-- Acceptor zone -->
+<rect x="930" y="30" width="440" height="380" rx="6" fill="#fff1f2" stroke="#fda4af" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="1150" y="50" text-anchor="middle" font-size="10" fill="#be123c" font-weight="bold" letter-spacing="1">COIN / BILL ACCEPTORS</text>
+
+<!-- Arduino Uno zone -->
+<rect x="930" y="430" width="440" height="350" rx="6" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.2" stroke-dasharray="5,3"/>
+<text x="1150" y="450" text-anchor="middle" font-size="10" fill="#0369a1" font-weight="bold" letter-spacing="1">ARDUINO UNO (KEYPAD + LCD)</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     ESP32 IC BODY
+═══════════════════════════════════════════════════════════ -->
+<rect x="60" y="65" width="260" height="700" rx="4" fill="#fff" stroke="#c2410c" stroke-width="2"/>
+<text x="190" y="88"  text-anchor="middle" font-size="13" font-weight="bold" fill="#c2410c">ESP32</text>
+<text x="190" y="103" text-anchor="middle" font-size="9"  fill="#666">WROOM-32  3.3 V</text>
+
+<!-- pin stubs left side of ESP32 -->
+<!-- Left pins: GND, 3V3, EN, VP(36), VN(39), D34, D35, D32, D33, D25, D26 -->
+<g font-size="9" fill="#222" font-family="Arial">
+
+  <!-- 3V3 -->
+  <line x1="60" y1="130" x2="36" y2="130" stroke="#c00" stroke-width="1.5"/>
+  <use href="#v5" x="21" y="116" width="16" height="14"/>
+  <text x="63" y="127" font-size="8" fill="#c00">3V3</text>
+
+  <!-- GND -->
+  <line x1="60" y1="155" x2="36" y2="155" stroke="#222" stroke-width="1.5"/>
+  <use href="#gnd" x="26" y="155" width="20" height="16"/>
+  <text x="63" y="152" font-size="8">GND</text>
+
+  <!-- GPIO 21 (SDA) -->
+  <line x1="60" y1="185" x2="36" y2="185" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="182" font-size="8">GPIO21 SDA</text>
+
+  <!-- GPIO 22 (SCL) -->
+  <line x1="60" y1="210" x2="36" y2="210" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="207" font-size="8">GPIO22 SCL</text>
+
+  <!-- GPIO 16 RX2 -->
+  <line x1="60" y1="240" x2="36" y2="240" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="237" font-size="8">GPIO16 RX2</text>
+
+  <!-- GPIO 17 TX2 -->
+  <line x1="60" y1="265" x2="36" y2="265" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="262" font-size="8">GPIO17 TX2</text>
+
+  <!-- GPIO 14 COIN -->
+  <line x1="60" y1="295" x2="36" y2="295" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="292" font-size="8">GPIO14</text>
+
+  <!-- GPIO 32 BILL -->
+  <line x1="60" y1="320" x2="36" y2="320" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="317" font-size="8">GPIO32</text>
+
+  <!-- GPIO 27 IR4 -->
+  <line x1="60" y1="350" x2="36" y2="350" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="347" font-size="8">GPIO27</text>
+
+  <!-- GPIO 34 IR5-1 -->
+  <line x1="60" y1="380" x2="36" y2="380" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="377" font-size="8">GPIO34</text>
+
+  <!-- GPIO 33 IR5-2 -->
+  <line x1="60" y1="405" x2="36" y2="405" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="402" font-size="8">GPIO33</text>
+
+  <!-- GPIO 25 IR5-3 -->
+  <line x1="60" y1="430" x2="36" y2="430" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="427" font-size="8">GPIO25</text>
+
+  <!-- GPIO 26 IR5-4 -->
+  <line x1="60" y1="455" x2="36" y2="455" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="452" font-size="8">GPIO26</text>
+
+  <!-- GPIO 4 IR5-5 -->
+  <line x1="60" y1="480" x2="36" y2="480" stroke="#444" stroke-width="1.2"/>
+  <text x="63" y="477" font-size="8">GPIO4</text>
+
+  <!-- Right pins: M4 stepper IN1-IN4 -->
+  <!-- GPIO 18 M4-IN1 -->
+  <line x1="320" y1="295" x2="344" y2="295" stroke="#444" stroke-width="1.2"/>
+  <text x="248" y="292" font-size="8">GPIO18 M4-IN1</text>
+
+  <!-- GPIO 19 M4-IN2 -->
+  <line x1="320" y1="320" x2="344" y2="320" stroke="#444" stroke-width="1.2"/>
+  <text x="248" y="317" font-size="8">GPIO19 M4-IN2</text>
+
+  <!-- GPIO 23 M4-IN3 -->
+  <line x1="320" y1="345" x2="344" y2="345" stroke="#444" stroke-width="1.2"/>
+  <text x="248" y="342" font-size="8">GPIO23 M4-IN3</text>
+
+  <!-- GPIO 13 M4-IN4 -->
+  <line x1="320" y1="370" x2="344" y2="370" stroke="#444" stroke-width="1.2"/>
+  <text x="248" y="367" font-size="8">GPIO13 M4-IN4</text>
+
+  <!-- USB / GND bottom -->
+  <line x1="60" y1="700" x2="36" y2="700" stroke="#222" stroke-width="1.5"/>
+  <use href="#gnd" x="26" y="700" width="20" height="16"/>
+  <text x="63" y="697" font-size="8">GND</text>
+
+  <!-- USB label -->
+  <rect x="120" y="715" width="140" height="28" rx="4" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1"/>
+  <text x="190" y="727" text-anchor="middle" font-size="9" font-weight="bold" fill="#334155">USB ↔ PC</text>
+  <text x="190" y="737" text-anchor="middle" font-size="8" fill="#64748b">serial_bridge.py  115200</text>
+  <line x1="160" y1="715" x2="160" y2="700" stroke="#555" stroke-width="1.2"/>
+  <line x1="220" y1="715" x2="220" y2="700" stroke="#555" stroke-width="1.2"/>
+</g>
+
+<!-- ══════════════════════════════════════════════════════════
+     PCA9685 IC
+═══════════════════════════════════════════════════════════ -->
+<rect x="400" y="65" width="200" height="320" rx="4" fill="#fff" stroke="#166534" stroke-width="1.8"/>
+<text x="500" y="88"  text-anchor="middle" font-size="12" font-weight="bold" fill="#166534">PCA9685</text>
+<text x="500" y="101" text-anchor="middle" font-size="8"  fill="#666">16-CH PWM  I²C  0x40</text>
+
+<!-- I2C left stubs -->
+<line x1="400" y1="130" x2="380" y2="130" stroke="#444" stroke-width="1.2"/>
+<text x="403" y="127" font-size="8">SDA</text>
+<line x1="400" y1="150" x2="380" y2="150" stroke="#444" stroke-width="1.2"/>
+<text x="403" y="147" font-size="8">SCL</text>
+<line x1="400" y1="170" x2="380" y2="170" stroke="#222" stroke-width="1.5"/>
+<use href="#gnd" x="370" y="170" width="20" height="16"/>
+<text x="403" y="167" font-size="8">GND</text>
+<line x1="400" y1="195" x2="380" y2="195" stroke="#c00" stroke-width="1.5"/>
+<use href="#v5" x="365" y="181" width="16" height="14"/>
+<text x="403" y="192" font-size="8">VCC 3V3</text>
+
+<!-- VCC right (servo power) -->
+<line x1="600" y1="195" x2="620" y2="195" stroke="#c00" stroke-width="1.5"/>
+<text x="548" y="192" font-size="8">V+ (5V servo)</text>
+<use href="#v5" x="620" y="181" width="16" height="14"/>
+
+<!-- PWM outputs right -->
+<g font-size="8" fill="#222">
+  <line x1="600" y1="230" x2="650" y2="230" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="540" y="227" fill="#1d4ed8">CH0 Spinner-1</text>
+  <line x1="600" y1="250" x2="650" y2="250" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="540" y="247" fill="#1d4ed8">CH1 Spinner-2</text>
+  <line x1="600" y1="270" x2="650" y2="270" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="540" y="267" fill="#1d4ed8">CH2 Spinner-3</text>
+  <line x1="600" y1="290" x2="650" y2="290" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="540" y="287" fill="#1d4ed8">CH3 Spinner-4</text>
+  <line x1="600" y1="310" x2="650" y2="310" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="540" y="307" fill="#1d4ed8">CH4 Spinner-5</text>
+  <line x1="600" y1="330" x2="650" y2="330" stroke="#7c3aed" stroke-width="1.2"/>
+  <text x="530" y="327" fill="#7c3aed">CH5 Elev-Lift</text>
+  <line x1="600" y1="350" x2="650" y2="350" stroke="#7c3aed" stroke-width="1.2"/>
+  <text x="530" y="347" fill="#7c3aed">CH6 Elev-Out</text>
+</g>
+
+<!-- I2C bus lines from ESP32 to PCA9685 -->
+<!-- SDA: GPIO21 → PCA SDA -->
+<line x1="36" y1="185" x2="24" y2="185" stroke="#444" stroke-width="1.2"/>
+<line x1="24" y1="185" x2="24" y2="130" stroke="#444" stroke-width="1.2"/>
+<line x1="24" y1="130" x2="380" y2="130" stroke="#444" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="200" y="125" text-anchor="middle" font-size="8" fill="#444">SDA (GPIO21)</text>
+
+<!-- SCL: GPIO22 → PCA SCL -->
+<line x1="36" y1="210" x2="22" y2="210" stroke="#444" stroke-width="1.2"/>
+<line x1="22" y1="210" x2="22" y2="150" stroke="#444" stroke-width="1.2"/>
+<line x1="22" y1="150" x2="380" y2="150" stroke="#444" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="200" y="145" text-anchor="middle" font-size="8" fill="#444">SCL (GPIO22)</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     SERVO MOTORS
+═══════════════════════════════════════════════════════════ -->
+<!-- 5× Spinner Servos -->
+<g font-size="8" fill="#222">
+  <!-- Helper macro: servo box -->
+  <!-- Spinner 1 -->
+  <rect x="670" y="220" width="100" height="40" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.3"/>
+  <text x="720" y="237" text-anchor="middle" font-size="9" font-weight="bold" fill="#1e40af">Servo CH0</text>
+  <text x="720" y="250" text-anchor="middle" font-size="8" fill="#1e40af">Spinner Slot 1</text>
+  <line x1="650" y1="230" x2="670" y2="230" stroke="#1d4ed8" stroke-width="1.2"/>
+
+  <!-- Spinner 2 -->
+  <rect x="670" y="242" width="100" height="40" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.3" transform="translate(0,18)"/>
+  <text x="720" y="258" text-anchor="middle" font-size="9" font-weight="bold" fill="#1e40af">Servo CH1</text>
+  <text x="720" y="271" text-anchor="middle" font-size="8" fill="#1e40af">Spinner Slot 2</text>
+  <line x1="650" y1="250" x2="670" y2="252" stroke="#1d4ed8" stroke-width="1.2"/>
+
+  <!-- Spinner 3 -->
+  <rect x="670" y="280" width="100" height="40" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.3"/>
+  <text x="720" y="297" text-anchor="middle" font-size="9" font-weight="bold" fill="#1e40af">Servo CH2</text>
+  <text x="720" y="310" text-anchor="middle" font-size="8" fill="#1e40af">Spinner Slot 3</text>
+  <line x1="650" y1="270" x2="670" y2="282" stroke="#1d4ed8" stroke-width="1.2"/>
+
+  <!-- Spinner 4 -->
+  <rect x="670" y="305" width="100" height="40" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.3"/>
+  <text x="720" y="322" text-anchor="middle" font-size="9" font-weight="bold" fill="#1e40af">Servo CH3</text>
+  <text x="720" y="335" text-anchor="middle" font-size="8" fill="#1e40af">Spinner Slot 4</text>
+  <line x1="650" y1="290" x2="670" y2="307" stroke="#1d4ed8" stroke-width="1.2"/>
+
+  <!-- Spinner 5 -->
+  <rect x="670" y="330" width="100" height="40" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.3"/>
+  <text x="720" y="347" text-anchor="middle" font-size="9" font-weight="bold" fill="#1e40af">Servo CH4</text>
+  <text x="720" y="360" text-anchor="middle" font-size="8" fill="#1e40af">Spinner Slot 5</text>
+  <line x1="650" y1="310" x2="670" y2="332" stroke="#1d4ed8" stroke-width="1.2"/>
+
+  <!-- Elevator Lift -->
+  <rect x="670" y="355" width="100" height="40" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.3"/>
+  <text x="720" y="372" text-anchor="middle" font-size="9" font-weight="bold" fill="#6d28d9">Servo CH5</text>
+  <text x="720" y="385" text-anchor="middle" font-size="8" fill="#6d28d9">Elevator Lift</text>
+  <line x1="650" y1="330" x2="670" y2="357" stroke="#7c3aed" stroke-width="1.2"/>
+
+  <!-- Elevator Out -->
+  <rect x="670" y="380" width="100" height="40" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.3"/>
+  <text x="720" y="397" text-anchor="middle" font-size="9" font-weight="bold" fill="#6d28d9">Servo CH6</text>
+  <text x="720" y="410" text-anchor="middle" font-size="8" fill="#6d28d9">Elev. Output</text>
+  <line x1="650" y1="350" x2="670" y2="382" stroke="#7c3aed" stroke-width="1.2"/>
+
+  <!-- Common servo GND / VCC rails -->
+  <line x1="780" y1="230" x2="810" y2="230" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="260" x2="810" y2="260" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="282" x2="810" y2="282" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="307" x2="810" y2="307" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="332" x2="810" y2="332" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="357" x2="810" y2="357" stroke="#c00" stroke-width="1"/>
+  <line x1="780" y1="382" x2="810" y2="382" stroke="#c00" stroke-width="1"/>
+  <line x1="810" y1="230" x2="810" y2="382" stroke="#c00" stroke-width="1.5"/>
+  <text x="820" y="308" font-size="8" fill="#c00">5V</text>
+
+  <line x1="780" y1="245" x2="830" y2="245" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="275" x2="830" y2="275" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="297" x2="830" y2="297" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="322" x2="830" y2="322" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="347" x2="830" y2="347" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="372" x2="830" y2="372" stroke="#222" stroke-width="1"/>
+  <line x1="780" y1="397" x2="830" y2="397" stroke="#222" stroke-width="1"/>
+  <line x1="830" y1="245" x2="830" y2="397" stroke="#222" stroke-width="1.5"/>
+  <use href="#gnd" x="820" y="397" width="20" height="16"/>
+</g>
+
+<!-- ══════════════════════════════════════════════════════════
+     IR SENSORS (TCRT5000) – 6 sensors
+     IR4=GPIO27, IR5_1=GPIO34, IR5_2=GPIO33, IR5_3=GPIO25, IR5_4=GPIO26, IR5_5=GPIO4
+═══════════════════════════════════════════════════════════ -->
+<!-- IR sensor schematic symbol: LED + phototransistor side-by-side in a box -->
+<g font-size="8" fill="#222">
+
+  <!-- IR4 -->
+  <rect x="400" y="470" width="200" height="50" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="490" font-size="9" font-weight="bold" fill="#92400e">IR4 (GPIO27)</text>
+  <text x="430" y="503" font-size="8" fill="#78350f">TCRT5000  active-low</text>
+  <!-- LED symbol inside -->
+  <line x1="560" y1="480" x2="570" y2="480" stroke="#ca8a04" stroke-width="1"/>
+  <polygon points="560,476 560,484 568,480" fill="none" stroke="#ca8a04" stroke-width="1"/>
+  <!-- phototransistor symbol -->
+  <line x1="575" y1="476" x2="575" y2="484" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="570" y1="480" x2="585" y2="480" stroke="#ca8a04" stroke-width="1"/>
+  <!-- out stub -->
+  <line x1="400" y1="495" x2="380" y2="495" stroke="#ca8a04" stroke-width="1.2"/>
+  <!-- VCC/GND stubs -->
+  <line x1="450" y1="470" x2="450" y2="460" stroke="#c00" stroke-width="1"/>
+  <use href="#v5" x="435" y="446" width="16" height="14"/>
+  <line x1="500" y1="470" x2="500" y2="460" stroke="#222" stroke-width="1"/>
+  <use href="#gnd" x="490" y="460" width="20" height="16"/>
+
+  <!-- IR5-1 .. IR5-5 (compact) -->
+  <!-- helper: y positions for 5 sensors -->
+  <!-- IR5_1 GPIO34 -->
+  <rect x="400" y="535" width="200" height="38" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="552" font-size="9" font-weight="bold" fill="#92400e">IR5-1 (GPIO34)</text>
+  <text x="430" y="564" font-size="8" fill="#78350f">Elevator pos sensor</text>
+  <line x1="400" y1="554" x2="380" y2="554" stroke="#ca8a04" stroke-width="1.2"/>
+
+  <!-- IR5_2 GPIO33 -->
+  <rect x="400" y="582" width="200" height="38" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="598" font-size="9" font-weight="bold" fill="#92400e">IR5-2 (GPIO33)</text>
+  <text x="430" y="611" font-size="8" fill="#78350f">Elevator pos sensor</text>
+  <line x1="400" y1="601" x2="380" y2="601" stroke="#ca8a04" stroke-width="1.2"/>
+
+  <!-- IR5_3 GPIO25 -->
+  <rect x="400" y="629" width="200" height="38" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="645" font-size="9" font-weight="bold" fill="#92400e">IR5-3 (GPIO25)</text>
+  <text x="430" y="658" font-size="8" fill="#78350f">Elevator pos sensor</text>
+  <line x1="400" y1="648" x2="380" y2="648" stroke="#ca8a04" stroke-width="1.2"/>
+
+  <!-- IR5_4 GPIO26 -->
+  <rect x="400" y="676" width="200" height="38" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="692" font-size="9" font-weight="bold" fill="#92400e">IR5-4 (GPIO26)</text>
+  <text x="430" y="705" font-size="8" fill="#78350f">Elevator pos sensor</text>
+  <line x1="400" y1="695" x2="380" y2="695" stroke="#ca8a04" stroke-width="1.2"/>
+
+  <!-- IR5_5 GPIO4 -->
+  <rect x="400" y="723" width="200" height="38" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.3"/>
+  <text x="430" y="739" font-size="9" font-weight="bold" fill="#92400e">IR5-5 (GPIO4)</text>
+  <text x="430" y="752" font-size="8" fill="#78350f">Elevator pos sensor</text>
+  <line x1="400" y1="742" x2="380" y2="742" stroke="#ca8a04" stroke-width="1.2"/>
+
+  <!-- Bus line from ESP32 to IR sensors -->
+  <!-- IR4 -->
+  <line x1="36" y1="350" x2="20" y2="350" stroke="#ca8a04" stroke-width="1.2"/>
+  <line x1="20" y1="350" x2="20" y2="495" stroke="#ca8a04" stroke-width="1.2"/>
+  <line x1="20" y1="495" x2="380" y2="495" stroke="#ca8a04" stroke-width="1.2" marker-end="url(#ahs)"/>
+
+  <!-- IR5_1 GPIO34 -->
+  <line x1="36" y1="380" x2="18" y2="380" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="18" y1="380" x2="18" y2="554" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="18" y1="554" x2="380" y2="554" stroke="#ca8a04" stroke-width="1" marker-end="url(#ahs)"/>
+
+  <!-- IR5_2 GPIO33 -->
+  <line x1="36" y1="405" x2="16" y2="405" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="16" y1="405" x2="16" y2="601" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="16" y1="601" x2="380" y2="601" stroke="#ca8a04" stroke-width="1" marker-end="url(#ahs)"/>
+
+  <!-- IR5_3 GPIO25 -->
+  <line x1="36" y1="430" x2="14" y2="430" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="14" y1="430" x2="14" y2="648" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="14" y1="648" x2="380" y2="648" stroke="#ca8a04" stroke-width="1" marker-end="url(#ahs)"/>
+
+  <!-- IR5_4 GPIO26 -->
+  <line x1="36" y1="455" x2="12" y2="455" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="12" y1="455" x2="12" y2="695" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="12" y1="695" x2="380" y2="695" stroke="#ca8a04" stroke-width="1" marker-end="url(#ahs)"/>
+
+  <!-- IR5_5 GPIO4 -->
+  <line x1="36" y1="480" x2="10" y2="480" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="10" y1="480" x2="10" y2="742" stroke="#ca8a04" stroke-width="1"/>
+  <line x1="10" y1="742" x2="380" y2="742" stroke="#ca8a04" stroke-width="1" marker-end="url(#ahs)"/>
+
+</g>
+
+<!-- ══════════════════════════════════════════════════════════
+     STEPPER MOTOR (28BYJ-48) via ULN2003 driver
+═══════════════════════════════════════════════════════════ -->
+<!-- ULN2003 driver board -->
+<rect x="660" y="460" width="120" height="80" rx="3" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1.5"/>
+<text x="720" y="477" text-anchor="middle" font-size="9" font-weight="bold" fill="#6d28d9">ULN2003</text>
+<text x="720" y="489" text-anchor="middle" font-size="8" fill="#7c3aed">Driver Board</text>
+<text x="720" y="501" text-anchor="middle" font-size="8" fill="#7c3aed">IN1 IN2 IN3 IN4</text>
+<text x="720" y="514" text-anchor="middle" font-size="8" fill="#7c3aed">5V / GND</text>
+<!-- IN lines from ESP32 -->
+<line x1="344" y1="295" x2="360" y2="295" stroke="#7c3aed" stroke-width="1.2"/>
+<line x1="360" y1="295" x2="360" y2="470" stroke="#7c3aed" stroke-width="1.2"/>
+<line x1="360" y1="470" x2="660" y2="470" stroke="#7c3aed" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="510" y="467" text-anchor="middle" font-size="7.5" fill="#7c3aed">IN1(18) IN2(19) IN3(23) IN4(13)</text>
+
+<!-- 28BYJ-48 motor -->
+<rect x="810" y="460" width="100" height="80" rx="3" fill="#fdf4ff" stroke="#7c3aed" stroke-width="1.5"/>
+<text x="860" y="495" text-anchor="middle" font-size="9" font-weight="bold" fill="#6d28d9">28BYJ-48</text>
+<text x="860" y="508" text-anchor="middle" font-size="8" fill="#7c3aed">Stepper Motor</text>
+<text x="860" y="521" text-anchor="middle" font-size="8" fill="#7c3aed">5V Unipolar</text>
+<line x1="780" y1="500" x2="810" y2="500" stroke="#7c3aed" stroke-width="1.5"/>
+
+<!-- ══════════════════════════════════════════════════════════
+     COIN ACCEPTOR
+═══════════════════════════════════════════════════════════ -->
+<rect x="960" y="65" width="170" height="120" rx="4" fill="#fff" stroke="#be123c" stroke-width="1.8"/>
+<text x="1045" y="86"  text-anchor="middle" font-size="11" font-weight="bold" fill="#be123c">COIN ACCEPTOR</text>
+<text x="1045" y="100" text-anchor="middle" font-size="8"  fill="#666">YDR-09 / CH-926</text>
+
+<!-- Coin pins -->
+<line x1="960" y1="115" x2="940" y2="115" stroke="#c00" stroke-width="1.5"/>
+<use href="#v5" x="925" y="101" width="16" height="14"/>
+<text x="963" y="112" font-size="8" fill="#c00">+12V</text>
+
+<line x1="960" y1="138" x2="940" y2="138" stroke="#222" stroke-width="1.5"/>
+<use href="#gnd" x="930" y="138" width="20" height="16"/>
+<text x="963" y="135" font-size="8">GND</text>
+
+<line x1="960" y1="160" x2="940" y2="160" stroke="#444" stroke-width="1.2"/>
+<text x="963" y="157" font-size="8">SIGNAL (pulse)</text>
+
+<!-- Coin signal wire to ESP32 GPIO14 -->
+<!-- direct wiring note -->
+<line x1="940" y1="160" x2="910" y2="160" stroke="#444" stroke-width="1.2"/>
+<line x1="910" y1="160" x2="910" y2="295" stroke="#444" stroke-width="1.2"/>
+<line x1="910" y1="295" x2="344" y2="295" stroke="#444" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="627" y="155" text-anchor="middle" font-size="8" fill="#444">COIN PULSE → GPIO14</text>
+<text x="627" y="165" text-anchor="middle" font-size="7" fill="#888">(direct, no optocoupler)</text>
+
+<!-- Decoupling cap on coin signal line -->
+<line x1="910" y1="220" x2="928" y2="220" stroke="#444" stroke-width="1"/>
+<use href="#cap" x="928" y="210" width="20" height="20"/>
+<line x1="948" y1="220" x2="960" y2="220" stroke="#444" stroke-width="1"/>
+<line x1="960" y1="220" x2="960" y2="230" stroke="#222" stroke-width="1"/>
+<use href="#gnd" x="950" y="230" width="20" height="16"/>
+<text x="970" y="218" font-size="7" fill="#666">100nF</text>
+
+<!-- Resistor on coin signal -->
+<line x1="910" y1="250" x2="910" y2="246" stroke="#444" stroke-width="1"/>
+<use href="#res" x="890" y="246" width="40" height="12"/>
+<line x1="910" y1="258" x2="910" y2="295" stroke="#444" stroke-width="1"/>
+<text x="920" y="256" font-size="7" fill="#666">10kΩ↓</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     BILL ACCEPTOR
+═══════════════════════════════════════════════════════════ -->
+<rect x="1160" y="65" width="170" height="120" rx="4" fill="#fff" stroke="#be123c" stroke-width="1.8"/>
+<text x="1245" y="86"  text-anchor="middle" font-size="11" font-weight="bold" fill="#be123c">BILL ACCEPTOR</text>
+<text x="1245" y="100" text-anchor="middle" font-size="8"  fill="#666">WBA-01 / generic</text>
+
+<line x1="1160" y1="115" x2="1140" y2="115" stroke="#c00" stroke-width="1.5"/>
+<use href="#v5" x="1125" y="101" width="16" height="14"/>
+<text x="1163" y="112" font-size="8" fill="#c00">+12V</text>
+
+<line x1="1160" y1="138" x2="1140" y2="138" stroke="#222" stroke-width="1.5"/>
+<use href="#gnd" x="1130" y="138" width="20" height="16"/>
+<text x="1163" y="135" font-size="8">GND</text>
+
+<line x1="1160" y1="160" x2="1140" y2="160" stroke="#444" stroke-width="1.2"/>
+<text x="1163" y="157" font-size="8">SIGNAL (pulse)</text>
+
+<!-- Bill signal wire to ESP32 GPIO32 -->
+<line x1="1140" y1="160" x2="1110" y2="160" stroke="#444" stroke-width="1.2"/>
+<line x1="1110" y1="160" x2="1110" y2="320" stroke="#444" stroke-width="1.2"/>
+<line x1="1110" y1="320" x2="920" y2="320" stroke="#444" stroke-width="1.2"/>
+<line x1="920" y1="320" x2="344" y2="320" stroke="#444" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="730" y="315" text-anchor="middle" font-size="8" fill="#444">BILL PULSE → GPIO32</text>
+<text x="730" y="325" text-anchor="middle" font-size="7" fill="#888">(direct, no optocoupler)</text>
+
+<!-- Decoupling cap on bill -->
+<line x1="1110" y1="230" x2="1128" y2="230" stroke="#444" stroke-width="1"/>
+<use href="#cap" x="1128" y="220" width="20" height="20"/>
+<line x1="1148" y1="230" x2="1160" y2="230" stroke="#444" stroke-width="1"/>
+<line x1="1160" y1="230" x2="1160" y2="240" stroke="#222" stroke-width="1"/>
+<use href="#gnd" x="1150" y="240" width="20" height="16"/>
+<text x="1170" y="228" font-size="7" fill="#666">100nF</text>
+
+<!-- Resistor on bill signal -->
+<line x1="1110" y1="260" x2="1110" y2="256" stroke="#444" stroke-width="1"/>
+<use href="#res" x="1090" y="256" width="40" height="12"/>
+<line x1="1110" y1="268" x2="1110" y2="320" stroke="#444" stroke-width="1"/>
+<text x="1120" y="266" font-size="7" fill="#666">10kΩ↓</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     POWER SUPPLY NOTE
+═══════════════════════════════════════════════════════════ -->
+<rect x="960" y="215" width="380" height="70" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1.2"/>
+<text x="1150" y="232" text-anchor="middle" font-size="10" font-weight="bold" fill="#166534">POWER SUPPLY</text>
+<text x="980" y="250" font-size="9" fill="#166534">• 12 V DC adapter → coin / bill acceptors</text>
+<text x="980" y="264" font-size="9" fill="#166534">• 5 V (USB / buck converter) → ESP32, PCA9685, servos</text>
+<text x="980" y="278" font-size="9" fill="#166534">• ESP32 3.3 V LDO → IR sensors, logic signals</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     ARDUINO UNO (Keypad + I2C LCD)
+═══════════════════════════════════════════════════════════ -->
+<rect x="950" y="465" width="200" height="220" rx="4" fill="#fff" stroke="#0369a1" stroke-width="1.8"/>
+<text x="1050" y="486"  text-anchor="middle" font-size="12" font-weight="bold" fill="#0369a1">ARDUINO UNO</text>
+<text x="1050" y="500" text-anchor="middle" font-size="8"  fill="#666">ATmega328P  5V</text>
+
+<!-- Uno pins -->
+<g font-size="8" fill="#0369a1">
+  <text x="965" y="522">A4 → SDA (LCD)</text>
+  <text x="965" y="537">A5 → SCL (LCD)</text>
+  <text x="965" y="553">D2..D8 → 4×4 Keypad</text>
+  <text x="965" y="568">RX(0) ← TX2 (ESP32)</text>
+  <text x="965" y="583">TX(1) → RX2 (ESP32)</text>
+  <text x="965" y="598">5V / GND</text>
+</g>
+
+<!-- Serial lines Uno ↔ ESP32 -->
+<line x1="950" y1="573" x2="900" y2="573" stroke="#0369a1" stroke-width="1.2"/>
+<line x1="900" y1="573" x2="900" y2="265" stroke="#0369a1" stroke-width="1.2"/>
+<line x1="900" y1="265" x2="344" y2="265" stroke="#0369a1" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="622" y="261" text-anchor="middle" font-size="8" fill="#0369a1">TX2 (GPIO17) → UNO RX</text>
+
+<line x1="950" y1="558" x2="898" y2="558" stroke="#0369a1" stroke-width="1.2"/>
+<line x1="898" y1="558" x2="898" y2="240" stroke="#0369a1" stroke-width="1.2"/>
+<line x1="898" y1="240" x2="344" y2="240" stroke="#0369a1" stroke-width="1.2" marker-end="url(#ahs)"/>
+<text x="622" y="236" text-anchor="middle" font-size="8" fill="#0369a1">RX2 (GPIO16) ← UNO TX</text>
+
+<!-- I2C LCD module -->
+<rect x="1200" y="465" width="150" height="80" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+<text x="1275" y="485" text-anchor="middle" font-size="11" font-weight="bold" fill="#1d4ed8">LCD 16×2</text>
+<text x="1275" y="499" text-anchor="middle" font-size="8"  fill="#1d4ed8">I²C addr 0x27</text>
+<text x="1275" y="513" text-anchor="middle" font-size="8"  fill="#1d4ed8">SDA A4 / SCL A5</text>
+<line x1="1150" y1="525" x2="1200" y2="525" stroke="#2563eb" stroke-width="1.2"/>
+
+<!-- 4×4 Keypad -->
+<rect x="1200" y="565" width="150" height="80" rx="4" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5"/>
+<text x="1275" y="585" text-anchor="middle" font-size="11" font-weight="bold" fill="#075985">4×4 Keypad</text>
+<text x="1275" y="600" text-anchor="middle" font-size="8"  fill="#075985">D2, D3, D4, D5</text>
+<text x="1275" y="614" text-anchor="middle" font-size="8"  fill="#075985">D6, D7, D8, D9</text>
+<line x1="1150" y1="600" x2="1200" y2="600" stroke="#0284c7" stroke-width="1.2"/>
+
+<!-- ══════════════════════════════════════════════════════════
+     TITLE BLOCK
+═══════════════════════════════════════════════════════════ -->
+<!-- outer title block border at bottom -->
+<rect x="12" y="845" width="1376" height="123" fill="#f8fafc" stroke="#222" stroke-width="1.5"/>
+
+<!-- Vertical dividers -->
+<line x1="12"   y1="845" x2="12"   y2="968" stroke="#222" stroke-width="1"/>
+<line x1="440"  y1="845" x2="440"  y2="968" stroke="#222" stroke-width="1.2"/>
+<line x1="780"  y1="845" x2="780"  y2="968" stroke="#222" stroke-width="1.2"/>
+<line x1="1060" y1="845" x2="1060" y2="968" stroke="#222" stroke-width="1.2"/>
+<line x1="1250" y1="845" x2="1250" y2="968" stroke="#222" stroke-width="1.2"/>
+
+<!-- Horizontal sub-dividers -->
+<line x1="440"  y1="900" x2="780"  y2="900" stroke="#222" stroke-width="0.8"/>
+<line x1="780"  y1="900" x2="1060" y2="900" stroke="#222" stroke-width="0.8"/>
+<line x1="1060" y1="900" x2="1250" y2="900" stroke="#222" stroke-width="0.8"/>
+<line x1="1250" y1="900" x2="1388" y2="900" stroke="#222" stroke-width="0.8"/>
+
+<!-- PROJECT / TITLE cell (left, full height) -->
+<text x="226" y="885" text-anchor="middle" font-size="18" font-weight="bold" fill="#0f172a">ATM Learning System</text>
+<text x="226" y="908" text-anchor="middle" font-size="13" fill="#334155">Electronic Schematic Diagram</text>
+<text x="226" y="928" text-anchor="middle" font-size="10" fill="#64748b">ESP32 · PCA9685 · Servos · IR Sensors · Coin/Bill Acceptors · Arduino Uno</text>
+<text x="226" y="948" text-anchor="middle" font-size="9" fill="#94a3b8">Hardware Interface &amp; Control Circuit</text>
+
+<!-- DRAWN BY -->
+<text x="500" y="864" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">DRAWN BY</text>
+<text x="500" y="880" text-anchor="middle" font-size="10" fill="#0f172a">Engineering Team</text>
+<!-- DATE -->
+<text x="500" y="912" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">DATE</text>
+<text x="500" y="928" text-anchor="middle" font-size="10" fill="#0f172a">May 1, 2026</text>
+<text x="500" y="950" text-anchor="middle" font-size="8" fill="#94a3b8">v1.1 – Direct Wiring (no optocoupler)</text>
+
+<!-- CHECKED BY -->
+<text x="920" y="864" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">CHECKED BY</text>
+<text x="920" y="880" text-anchor="middle" font-size="10" fill="#0f172a">Thesis Adviser</text>
+<!-- SCALE -->
+<text x="920" y="912" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">SCALE</text>
+<text x="920" y="928" text-anchor="middle" font-size="10" fill="#0f172a">Not to Scale</text>
+
+<!-- SHEET NO -->
+<text x="1155" y="864" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">SHEET</text>
+<text x="1155" y="888" text-anchor="middle" font-size="22" font-weight="bold" fill="#0f172a">1 / 1</text>
+<text x="1155" y="912" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">DOCUMENT NO.</text>
+<text x="1155" y="928" text-anchor="middle" font-size="9" fill="#0f172a">ATM-SCH-001</text>
+<text x="1155" y="948" text-anchor="middle" font-size="8" fill="#94a3b8">Thesis Hardware Rev 1.1</text>
+
+<!-- SCHOOL / INSTITUTION -->
+<text x="1319" y="864" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">INSTITUTION</text>
+<text x="1319" y="882" text-anchor="middle" font-size="9" fill="#0f172a">College of Engineering</text>
+<text x="1319" y="896" text-anchor="middle" font-size="9" fill="#0f172a">&amp; Information Technology</text>
+<text x="1319" y="916" text-anchor="middle" font-size="8" fill="#64748b" font-weight="bold">SUBJECT</text>
+<text x="1319" y="930" text-anchor="middle" font-size="9" fill="#0f172a">Undergraduate Thesis</text>
+<text x="1319" y="950" text-anchor="middle" font-size="8" fill="#94a3b8">A.Y. 2025–2026</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     REVISION HISTORY (small, top-right corner)
+═══════════════════════════════════════════════════════════ -->
+<rect x="1250" y="12" width="138" height="66" rx="3" fill="#f8fafc" stroke="#cbd5e1" stroke-width="0.8"/>
+<text x="1319" y="26" text-anchor="middle" font-size="8" font-weight="bold" fill="#475569">REVISION HISTORY</text>
+<line x1="1250" y1="30" x2="1388" y2="30" stroke="#cbd5e1" stroke-width="0.6"/>
+<text x="1258" y="42" font-size="7.5" fill="#334155">Rev   Date          Description</text>
+<text x="1258" y="54" font-size="7.5" fill="#334155">1.0   Apr 2026    Initial release (opto)</text>
+<text x="1258" y="66" font-size="7.5" fill="#334155">1.1   May 2026    Removed optocoupler</text>
+
+<!-- ══════════════════════════════════════════════════════════
+     NET LABELS (signal name tags on long wires)
+═══════════════════════════════════════════════════════════ -->
+<!-- I2C net label -->
+<rect x="195" y="119" width="50" height="14" rx="2" fill="#dcfce7" stroke="#86efac" stroke-width="0.8"/>
+<text x="220" y="129" text-anchor="middle" font-size="7.5" fill="#166534" font-weight="bold">I²C BUS</text>
+
+</svg>
+</body>
+</html>

@@ -1,169 +1,400 @@
 #include <AccelStepper.h>
+#include <SoftwareSerial.h>
 
-// 4x 28BYJ-48 + ULN2003 on Arduino Uno
-// Serial command format:
-//   M<n> <steps>
-// Examples:
-//   M1 2048    -> move motor 1 forward about 1 revolution
-//   M2 -1024   -> move motor 2 backward about half revolution
-//   STOP       -> stop all motors immediately
-//   ZERO       -> set current positions to 0
-//   STATUS     -> print current target and position of all motors
+// SoftwareSerial for ESP32 communication (A4=RX, A5=TX)
+// Uses analog pins 18 and 19 when configured as digital
+SoftwareSerial espSerial(18, 19);  // RX on A4 (pin 18), TX on A5 (pin 19)
+
+// UNO firmware compatible with ESP32 cash controller protocol.
+// Accepted commands:
+//   PING
+//   STATUS
+//   STOP
+//   DISPENSE <motor 1..3> <count>
+//
+// Expected responses consumed by ESP32:
+//   PONG
+//   STATUS ...
+//   OK DISPENSE motor=<n> count=<c>
+//   DONE motor=<n> count=<c>
+//   ERR motor=<n> reason=<text>
+//   OK STOP
 
 namespace {
 
-constexpr long SERIAL_BAUD = 115200;
-constexpr float MAX_SPEED = 700.0;
-constexpr float ACCELERATION = 450.0;
+constexpr long SERIAL_BAUD = 9600;
+constexpr float FULL_RUN_SPEED_STEPS_PER_SEC = 1200.0f;
+constexpr float DEFAULT_RUN_SPEED_STEPS_PER_SEC = FULL_RUN_SPEED_STEPS_PER_SEC;
+constexpr unsigned long MOTOR1_FORWARD_RUN_MS = 9000;
+constexpr unsigned long MOTOR1_BACKWARD_RUN_MS = 9000;
+constexpr unsigned long DEFAULT_FORWARD_RUN_MS = 10000;
+constexpr unsigned long DEFAULT_BACKWARD_RUN_MS = 10000;
+constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000; // 15 minutes safety cap
 
-AccelStepper motor1(AccelStepper::HALF4WIRE, 2, 4, 3, 5);
-AccelStepper motor2(AccelStepper::HALF4WIRE, 6, 8, 7, 9);
-AccelStepper motor3(AccelStepper::HALF4WIRE, 10, 12, 11, 13);
-AccelStepper motor4(AccelStepper::HALF4WIRE, A0, A2, A1, A3);
+// IR mapping provided by user
+constexpr uint8_t IR_1_PESO_PIN = A0;
+constexpr uint8_t IR_5_PESO_PIN = A1;
+constexpr uint8_t IR_10_PESO_PIN = A2;
+constexpr uint8_t IR_20_PESO_PIN = A3;
 
-AccelStepper* const motors[] = { &motor1, &motor2, &motor3, &motor4 };
-constexpr size_t MOTOR_COUNT = sizeof(motors) / sizeof(motors[0]);
+constexpr bool IR_ACTIVE_LOW = true;
+constexpr unsigned long IR_DETECT_HOLD_MS = 25;
 
-String commandBuffer;
+// 3 remote motors on Uno (motor 4 is local on ESP32 firmware).
+AccelStepper motor1(AccelStepper::HALF4WIRE, 2, 4, 3, 5);     // 1 peso
+AccelStepper motor2(AccelStepper::HALF4WIRE, 6, 8, 7, 9);     // 5 peso
+AccelStepper motor3(AccelStepper::HALF4WIRE, 10, 12, 11, 13); // 10 peso
 
-void printHelp() {
-  Serial.println(F("Commands:"));
-  Serial.println(F("  M1 2048   -> move motor 1 forward"));
-  Serial.println(F("  M2 -2048  -> move motor 2 backward"));
-  Serial.println(F("  STOP      -> stop all motors"));
-  Serial.println(F("  ZERO      -> set all current positions to zero"));
-  Serial.println(F("  STATUS    -> show motor positions"));
-  Serial.println(F("  HELP      -> show this message"));
+struct MotorSlot {
+  uint8_t motorNumber;
+  int denomination;
+  uint8_t irPin;
+  AccelStepper* stepper;
+  float forwardSpeedStepsPerSec;
+  float backwardSpeedStepsPerSec;
+  unsigned long forwardRunMs;
+  unsigned long backwardRunMs;
+};
+
+MotorSlot slots[] = {
+  {1, 1, IR_1_PESO_PIN, &motor1, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, MOTOR1_FORWARD_RUN_MS, MOTOR1_BACKWARD_RUN_MS},
+  {2, 5, IR_5_PESO_PIN, &motor2, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
+  {3, 10, IR_10_PESO_PIN, &motor3, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
+};
+
+constexpr size_t SLOT_COUNT = sizeof(slots) / sizeof(slots[0]);
+
+enum JobPhase : uint8_t {
+  JOB_IDLE = 0,
+  JOB_FORWARD = 1,
+  JOB_BACKWARD = 2,
+};
+
+struct DispenseJob {
+  bool active;
+  uint8_t motorNumber;
+  uint8_t targetCount;
+  uint8_t dispensedCount;
+  JobPhase phase;
+  unsigned long phaseStartedMs;
+  unsigned long cycleStartedMs;
+  unsigned long detectStartedMs;
+  bool cycleDetected;
+  unsigned long deadlineMs;
+};
+
+DispenseJob job = {};
+String serialBuffer;
+bool irLastState[4] = {false, false, false, false};
+
+uint8_t irPinByIndex(uint8_t index) {
+  switch (index) {
+    case 0: return IR_1_PESO_PIN;
+    case 1: return IR_5_PESO_PIN;
+    case 2: return IR_10_PESO_PIN;
+    default: return IR_20_PESO_PIN;
+  }
+}
+
+int irDenomByIndex(uint8_t index) {
+  switch (index) {
+    case 0: return 1;
+    case 1: return 5;
+    case 2: return 10;
+    default: return 20;
+  }
+}
+
+bool readIrBlocked(uint8_t pin) {
+  const int raw = digitalRead(pin);
+  return IR_ACTIVE_LOW ? (raw == LOW) : (raw == HIGH);
+}
+
+MotorSlot* findSlot(uint8_t motorNumber) {
+  for (size_t index = 0; index < SLOT_COUNT; ++index) {
+    if (slots[index].motorNumber == motorNumber) {
+      return &slots[index];
+    }
+  }
+  return nullptr;
+}
+
+void stopAllSteppers() {
+  for (size_t index = 0; index < SLOT_COUNT; ++index) {
+    slots[index].stepper->stop();
+    slots[index].stepper->disableOutputs();
+  }
 }
 
 void printStatus() {
-  for (size_t index = 0; index < MOTOR_COUNT; ++index) {
-    Serial.print(F("M"));
-    Serial.print(index + 1);
-    Serial.print(F(" pos="));
-    Serial.print(motors[index]->currentPosition());
-    Serial.print(F(" target="));
-    Serial.println(motors[index]->targetPosition());
+  espSerial.print(F("STATUS busy="));
+  espSerial.print(job.active ? 1 : 0);
+  espSerial.print(F(" m="));
+  espSerial.print(job.motorNumber);
+  espSerial.print(F(" c="));
+  espSerial.print(job.dispensedCount);
+  espSerial.print('/');
+  espSerial.print(job.targetCount);
+  espSerial.print(F(" phase="));
+  espSerial.print(static_cast<uint8_t>(job.phase));
+  espSerial.print(F(" detected="));
+  espSerial.print(job.cycleDetected ? 1 : 0);
+  espSerial.print(F(" ir1="));
+  espSerial.print(readIrBlocked(IR_1_PESO_PIN) ? 1 : 0);
+  espSerial.print(F(" ir5="));
+  espSerial.print(readIrBlocked(IR_5_PESO_PIN) ? 1 : 0);
+  espSerial.print(F(" ir10="));
+  espSerial.print(readIrBlocked(IR_10_PESO_PIN) ? 1 : 0);
+  espSerial.print(F(" ir20="));
+  espSerial.println(readIrBlocked(IR_20_PESO_PIN) ? 1 : 0);
+
+  for (size_t index = 0; index < SLOT_COUNT; ++index) {
+    espSerial.print(F("STATUS motor="));
+    espSerial.print(slots[index].motorNumber);
+    espSerial.print(F(" fwdSpeed="));
+    espSerial.print(slots[index].forwardSpeedStepsPerSec);
+    espSerial.print(F(" backSpeed="));
+    espSerial.println(slots[index].backwardSpeedStepsPerSec);
   }
 }
 
-void stopAllMotors() {
-  for (size_t index = 0; index < MOTOR_COUNT; ++index) {
-    motors[index]->stop();
-  }
-  Serial.println(F("OK STOP"));
+void finishJobDone() {
+  espSerial.print(F("DONE motor="));
+  espSerial.print(job.motorNumber);
+  espSerial.print(F(" count="));
+  espSerial.println(job.dispensedCount);
+  job = {};
 }
 
-void zeroAllPositions() {
-  for (size_t index = 0; index < MOTOR_COUNT; ++index) {
-    motors[index]->setCurrentPosition(0);
-  }
-  Serial.println(F("OK ZERO"));
+void failJob(const __FlashStringHelper* reason) {
+  espSerial.print(F("ERR motor="));
+  espSerial.print(job.motorNumber);
+  espSerial.print(F(" reason="));
+  espSerial.println(reason);
+  job = {};
 }
 
-void moveMotorByCommand(int motorNumber, long relativeSteps) {
-  if (motorNumber < 1 || motorNumber > static_cast<int>(MOTOR_COUNT)) {
-    Serial.println(F("ERR invalid motor"));
+void startDispense(uint8_t motorNumber, uint8_t count) {
+  MotorSlot* slot = findSlot(motorNumber);
+  if (slot == nullptr) {
+    espSerial.print(F("ERR motor="));
+    espSerial.print(motorNumber);
+    espSerial.println(F(" reason=unsupported"));
+    return;
+  }
+  if (count == 0) {
+    espSerial.print(F("ERR motor="));
+    espSerial.print(motorNumber);
+    espSerial.println(F(" reason=invalid-count"));
+    return;
+  }
+  if (job.active) {
+    espSerial.print(F("ERR motor="));
+    espSerial.print(motorNumber);
+    espSerial.println(F(" reason=busy"));
     return;
   }
 
-  AccelStepper* motor = motors[motorNumber - 1];
-  long nextTarget = motor->currentPosition() + relativeSteps;
-  motor->moveTo(nextTarget);
+  stopAllSteppers();
+  slot->stepper->enableOutputs();
+  const float forwardSpeed = slot->forwardSpeedStepsPerSec >= 0 ? slot->forwardSpeedStepsPerSec : -slot->forwardSpeedStepsPerSec;
+  slot->stepper->setMaxSpeed(forwardSpeed);
+  slot->stepper->setAcceleration(400.0f);
+  slot->stepper->moveTo(2000000L);
 
-  Serial.print(F("OK M"));
-  Serial.print(motorNumber);
-  Serial.print(F(" target="));
-  Serial.println(nextTarget);
+  job.active = true;
+  job.motorNumber = motorNumber;
+  job.targetCount = count;
+  job.dispensedCount = 0;
+  const unsigned long now = millis();
+  job.phase = JOB_FORWARD;
+  job.phaseStartedMs = now;
+  job.cycleStartedMs = now;
+  job.detectStartedMs = 0;
+  job.cycleDetected = false;
+  job.deadlineMs = now + JOB_MAX_RUNTIME_MS;
+
+  espSerial.print(F("OK DISPENSE motor="));
+  espSerial.print(motorNumber);
+  espSerial.print(F(" count="));
+  espSerial.println(count);
 }
 
-void handleCommand(String command) {
-  command.trim();
-  if (command.length() == 0) {
+void handleDispenseJob() {
+  if (!job.active) {
     return;
   }
 
-  command.toUpperCase();
-
-  if (command == F("HELP")) {
-    printHelp();
+  MotorSlot* slot = findSlot(job.motorNumber);
+  if (slot == nullptr) {
+    failJob(F("invalid-slot"));
+    stopAllSteppers();
     return;
   }
 
-  if (command == F("STATUS")) {
+  slot->stepper->run();
+
+  const unsigned long now = millis();
+  if (now > job.deadlineMs) {
+    stopAllSteppers();
+    failJob(F("timeout"));
+    return;
+  }
+
+  const float forwardSpeed = slot->forwardSpeedStepsPerSec >= 0 ? slot->forwardSpeedStepsPerSec : -slot->forwardSpeedStepsPerSec;
+  const float backwardSpeed = slot->backwardSpeedStepsPerSec >= 0 ? slot->backwardSpeedStepsPerSec : -slot->backwardSpeedStepsPerSec;
+  const bool blocked = readIrBlocked(slot->irPin);
+
+  if (!job.cycleDetected) {
+    if (blocked) {
+      if (job.detectStartedMs == 0) {
+        job.detectStartedMs = now;
+      } else if (now - job.detectStartedMs >= IR_DETECT_HOLD_MS) {
+        job.cycleDetected = true;
+      }
+    } else {
+      job.detectStartedMs = 0;
+    }
+
+  }
+
+  if (job.phase == JOB_FORWARD) {
+    if (now - job.phaseStartedMs >= slot->forwardRunMs) {
+      slot->stepper->setMaxSpeed(backwardSpeed);
+      slot->stepper->setAcceleration(400.0f);
+      slot->stepper->moveTo(-2000000L);
+      job.phase = JOB_BACKWARD;
+      job.phaseStartedMs = now;
+    }
+    return;
+  }
+
+  if (job.phase == JOB_BACKWARD) {
+    if (now - job.phaseStartedMs >= slot->backwardRunMs) {
+      if (job.cycleDetected) {
+        ++job.dispensedCount;
+        if (job.dispensedCount >= job.targetCount) {
+          stopAllSteppers();
+          finishJobDone();
+          return;
+        }
+      }
+
+      slot->stepper->setMaxSpeed(forwardSpeed);
+      slot->stepper->setAcceleration(400.0f);
+      slot->stepper->moveTo(2000000L);
+      job.phase = JOB_FORWARD;
+      job.phaseStartedMs = now;
+      job.cycleStartedMs = now;
+      job.detectStartedMs = 0;
+      job.cycleDetected = false;
+    }
+    return;
+  }
+}
+
+void handleCommand(String line) {
+  line.trim();
+  if (line.length() == 0) {
+    return;
+  }
+
+  line.toUpperCase();
+
+  if (line == F("PING")) {
+    espSerial.println(F("PONG"));
+    return;
+  }
+
+  if (line == F("STATUS")) {
     printStatus();
     return;
   }
 
-  if (command == F("STOP")) {
-    stopAllMotors();
+  if (line == F("STOP")) {
+    stopAllSteppers();
+    job = {};
+    espSerial.println(F("OK STOP"));
     return;
   }
 
-  if (command == F("ZERO")) {
-    zeroAllPositions();
+  if (line == F("HELP")) {
+    espSerial.println(F("Commands: PING, STATUS, STOP, DISPENSE <motor 1..3> <count>"));
     return;
   }
 
-  if (command.charAt(0) != 'M') {
-    Serial.println(F("ERR unknown command"));
+  int motorNumber = 0;
+  int count = 0;
+  if (sscanf(line.c_str(), "DISPENSE %d %d", &motorNumber, &count) == 2) {
+    startDispense(static_cast<uint8_t>(motorNumber), static_cast<uint8_t>(count));
     return;
   }
 
-  int spaceIndex = command.indexOf(' ');
-  if (spaceIndex < 0) {
-    Serial.println(F("ERR format use: M<n> <steps>"));
-    return;
-  }
-
-  int motorNumber = command.substring(1, spaceIndex).toInt();
-  long steps = command.substring(spaceIndex + 1).toInt();
-  moveMotorByCommand(motorNumber, steps);
+  espSerial.println(F("ERR motor=0 reason=unknown-command"));
 }
 
-void readSerialCommands() {
-  while (Serial.available() > 0) {
-    char incoming = static_cast<char>(Serial.read());
-
+void readSerialLines() {
+  // Read from ESP32 via SoftwareSerial
+  while (espSerial.available() > 0) {
+    const char incoming = static_cast<char>(espSerial.read());
     if (incoming == '\r') {
       continue;
     }
-
     if (incoming == '\n') {
-      handleCommand(commandBuffer);
-      commandBuffer = "";
+      handleCommand(serialBuffer);
+      serialBuffer = "";
       continue;
     }
-
-    if (commandBuffer.length() < 48) {
-      commandBuffer += incoming;
+    if (serialBuffer.length() < 80) {
+      serialBuffer += incoming;
     }
   }
 }
 
-void configureMotor(AccelStepper& motor) {
-  motor.setMaxSpeed(MAX_SPEED);
-  motor.setAcceleration(ACCELERATION);
+void pollIrEdgeLogs() {
+  for (uint8_t index = 0; index < 4; ++index) {
+    const bool blocked = readIrBlocked(irPinByIndex(index));
+    if (blocked != irLastState[index]) {
+      irLastState[index] = blocked;
+      espSerial.print(F("IR "));
+      espSerial.print(irDenomByIndex(index));
+      espSerial.print(F("P "));
+      espSerial.println(blocked ? F("BLOCK") : F("CLEAR"));
+    }
+  }
+}
+
+void setupMotor(AccelStepper& motor) {
+  motor.setMaxSpeed(DEFAULT_RUN_SPEED_STEPS_PER_SEC);
+  motor.setAcceleration(400.0f);
+  motor.disableOutputs();
 }
 
 }
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
+  espSerial.begin(SERIAL_BAUD);   // ESP32 serial on A4/A5
 
-  configureMotor(motor1);
-  configureMotor(motor2);
-  configureMotor(motor3);
-  configureMotor(motor4);
+  pinMode(IR_1_PESO_PIN, INPUT_PULLUP);
+  pinMode(IR_5_PESO_PIN, INPUT_PULLUP);
+  pinMode(IR_10_PESO_PIN, INPUT_PULLUP);
+  pinMode(IR_20_PESO_PIN, INPUT_PULLUP);
 
-  Serial.println(F("UNO 4-stepper serial controller ready"));
-  printHelp();
+  setupMotor(motor1);
+  setupMotor(motor2);
+  setupMotor(motor3);
+
+  for (uint8_t index = 0; index < 4; ++index) {
+    irLastState[index] = readIrBlocked(irPinByIndex(index));
+  }
+
+  Serial.println(F("UNO coin dispenser ready on USB Serial"));
+  espSerial.println(F("UNO READY"));
 }
 
 void loop() {
-  readSerialCommands();
-
-  for (size_t index = 0; index < MOTOR_COUNT; ++index) {
-    motors[index]->run();
-  }
+  readSerialLines();
+  pollIrEdgeLogs();
+  handleDispenseJob();
 }

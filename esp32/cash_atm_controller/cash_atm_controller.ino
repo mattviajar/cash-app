@@ -5,10 +5,10 @@
 namespace {
 
 constexpr long USB_SERIAL_BAUD = 115200;
-constexpr long UNO_SERIAL_BAUD = 115200;
+constexpr long UNO_SERIAL_BAUD = 9600;
 constexpr uint8_t UNO_RX_PIN = 16;
 constexpr uint8_t UNO_TX_PIN = 17;
-constexpr bool STEPPERS_ENABLED = false;
+constexpr bool STEPPERS_ENABLED = true;
 constexpr bool SERVOS_ENABLED = true;
 constexpr bool MOTION_ARMED_DEFAULT = true;
 constexpr bool AUTO_LIFT_TO_IR5_1_ON_BOOT = true;
@@ -16,14 +16,14 @@ constexpr bool AUTO_LIFT_TO_BOTTOM_ON_BOOT = false;
 constexpr bool AUTO_BILL_ROUTE_ENABLED = true;
 constexpr bool ACCEPTORS_CONNECTED = true;
 constexpr bool BILL_INPUT_ENABLED = true;
-constexpr bool COIN_INPUT_ENABLED = false;
+constexpr bool COIN_INPUT_ENABLED = true;
 constexpr bool IR5_VERBOSE_LOG = false;
 
 // IR sensors are wired active-low.
 constexpr bool ACTIVE_LOW = true;
-// Optocoupler inverts the signal: acceptor normal-high becomes active-low at GPIO.
+// Coin/bill acceptor outputs are typically open-collector and pull LOW on pulse.
 constexpr bool PULSE_ACTIVE_LOW = true;
-constexpr unsigned long DETECT_HOLD_MS = 120;
+constexpr unsigned long DETECT_HOLD_MS = 10;
 constexpr unsigned long IR5_DETECT_HOLD_MS = 140;
 constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
@@ -41,7 +41,7 @@ constexpr uint8_t M4_IN4_PIN = 13;
 constexpr uint8_t IR4_PIN = 27;
 
 constexpr uint8_t BILL_PIN = 32;
-constexpr uint8_t COIN_PIN = 35;
+constexpr uint8_t COIN_PIN = 14;
 // IR5_1 moved to GPIO34 to avoid conflict with BILL_PIN on GPIO32.
 constexpr uint8_t IR5_PINS[] = {34, 33, 25, 26, 4};
 
@@ -62,7 +62,9 @@ constexpr bool LIFT_DIRECTION_INVERTED = true;
 
 // 360 servo commands: 90=stop, >90 rotate one direction, <90 rotate opposite direction.
 constexpr uint8_t SERVO_STOP_CMD = 90;
-constexpr uint8_t SPINNER_RUN_CMD = 122;
+constexpr uint8_t SPINNER_RUN_CMD = 106;
+// Reverse direction to eject bills from storage during withdrawal (max speed).
+constexpr uint8_t SPINNER_WITHDRAW_CMD = 0;
 constexpr uint8_t ELEVATOR_LIFT_UP_CMD = 122;
 constexpr uint8_t ELEVATOR_LIFT_HOLD_CMD = 92;
 constexpr uint8_t ELEVATOR_LIFT_CATCH_SLOW_UP_CMD = 110;
@@ -85,6 +87,11 @@ constexpr unsigned long ELEVATOR_CATCH_SLOW_UP_MS = 1300;
 constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 220;
 constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 350;
 constexpr unsigned long ELEVATOR_LIFT_DIRECTION_TEST_MS = 2000;
+// Withdrawal timing
+constexpr unsigned long WITHDRAW_SPIN_MS = 2500;           // time to eject one bill
+constexpr unsigned long WITHDRAW_INTER_BILL_GAP_MS = 600;  // pause between bills
+constexpr unsigned long WITHDRAW_TOTAL_TIMEOUT_MS = 120000; // 2-min safety timeout
+constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000;        // 15-min motor safety cap
 
 constexpr uint8_t HALF_STEP[8][4] = {
   {1, 0, 0, 0},
@@ -104,10 +111,16 @@ struct PulseMap {
 
 // Update these maps to match the pulse programming in your acceptors.
 constexpr PulseMap COIN_MAP[] = {
+  // Common CH-926 style programming (1/2/3/4 pulses).
   {1, 1.0f},
   {2, 5.0f},
   {3, 10.0f},
   {4, 20.0f},
+  // Alternate pulse scale observed on your coin slot.
+  {5, 5.0f},
+  {10, 10.0f},
+  {15, 15.0f},
+  {20, 20.0f},
 };
 
 constexpr PulseMap BILL_MAP[] = {
@@ -130,14 +143,18 @@ struct MotorState {
   int sequenceIndex;
 };
 
+constexpr unsigned long M4_FORWARD_RUN_MS  = 10000;
+constexpr unsigned long M4_BACKWARD_RUN_MS = 10000;
+
 struct LocalDispenseJob {
   bool active;
   uint8_t requestedCount;
   uint8_t dispensedCount;
   bool sensorArmed;
+  bool goingForward;
   unsigned long startedMs;
   unsigned long coinDeadlineMs;
-  unsigned long settleUntilMs;
+  unsigned long phaseStartedMs;
   unsigned long detectStartedMs;
   unsigned long lastStepUs;
 };
@@ -188,6 +205,24 @@ struct BillRouteJob {
   bool liftRunning;
 };
 
+enum WithdrawStage {
+  WD_IDLE,
+  WD_MOVE_TO_SLOT,
+  WD_SPIN_BILL,
+  WD_BILL_GAP,
+  WD_MOVE_HOME,
+};
+
+struct WithdrawJob {
+  bool active;
+  uint8_t slotCounts[5];  // [0]=20s [1]=50s [2]=100s [3]=500s [4]=1000s
+  uint8_t currentSlot;
+  uint8_t billsLeft;
+  WithdrawStage stage;
+  unsigned long stageStartedMs;
+  unsigned long startedMs;
+};
+
 enum LiftToIr51Stage {
   LIFT_TO_1_FIND,
   LIFT_TO_1_SLOW_UP,
@@ -204,6 +239,7 @@ PulseInput coinInput = {COIN_PIN, "coin", true, false, 0, 0, 250, false, 0};
 // Use a larger idle gap so a single bill's pulse train is grouped correctly.
 PulseInput billInput = {BILL_PIN, "bill", true, false, 0, 0, 900, false, 0};
 BillRouteJob billRoute = {};
+WithdrawJob withdrawJob = {};
 bool liftToIr51Active = false;
 LiftToIr51Stage liftToIr51Stage = LIFT_TO_1_FIND;
 unsigned long liftToIr51StartedMs = 0;
@@ -301,6 +337,16 @@ void releaseMotor4() {
 }
 
 void stepMotor4Forward() {
+  writeMotor4(
+    HALF_STEP[motor4.sequenceIndex][0],
+    HALF_STEP[motor4.sequenceIndex][1],
+    HALF_STEP[motor4.sequenceIndex][2],
+    HALF_STEP[motor4.sequenceIndex][3]
+  );
+  motor4.sequenceIndex = (motor4.sequenceIndex + 7) & 0x07;
+}
+
+void stepMotor4Backward() {
   writeMotor4(
     HALF_STEP[motor4.sequenceIndex][0],
     HALF_STEP[motor4.sequenceIndex][1],
@@ -541,7 +587,7 @@ bool isIr5StableDetected(uint8_t slot, unsigned long nowMs) {
 
 void startBillRouteIfPending() {
   // For bill input flow, always finish catch-to-IR5-1 first before routing.
-  if (billRoute.active || pendingBillCount == 0 || liftToIr51Active) {
+  if (billRoute.active || pendingBillCount == 0 || liftToIr51Active || withdrawJob.active) {
     return;
   }
   // Wait for bill settle delay before routing.
@@ -718,9 +764,10 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
   motor4Job.sensorArmed = !isDetected(digitalRead(IR4_PIN));
+  motor4Job.goingForward = false;
   motor4Job.startedMs = millis();
-  motor4Job.coinDeadlineMs = motor4Job.startedMs + DISPENSE_TIMEOUT_MS;
-  motor4Job.settleUntilMs = motor4Job.startedMs + STARTUP_GRACE_MS;
+  motor4Job.coinDeadlineMs = motor4Job.startedMs + JOB_MAX_RUNTIME_MS;
+  motor4Job.phaseStartedMs = motor4Job.startedMs;
   motor4Job.detectStartedMs = 0;
   motor4Job.lastStepUs = micros();
   Serial.print(F("OK DISPENSE motor=4 count="));
@@ -770,6 +817,7 @@ void printHelp() {
   Serial.println(F("  PINGUNO"));
   Serial.println(F("  DISPENSE <motor 1..4> <count>"));
   Serial.println(F("  PAYOUT <amount>"));
+  Serial.println(F("  WITHDRAW <amount>  (20/50/100/500/1000 denominations)"));
   Serial.println(F("  ROUTE <slot1to5>"));
   Serial.println(F("  LIFTUP"));
   Serial.println(F("  LIFTDOWN"));
@@ -1377,10 +1425,18 @@ void serviceLocalMotor4() {
     return;
   }
 
-  if (nowMs < motor4Job.settleUntilMs) {
-    releaseMotor4();
-  } else if (nowUs - motor4Job.lastStepUs >= 2200) {
-    stepMotor4Forward();
+  // Oscillate forward/backward until enough coins are detected.
+  const unsigned long phaseRunMs = motor4Job.goingForward ? M4_FORWARD_RUN_MS : M4_BACKWARD_RUN_MS;
+  if (nowMs - motor4Job.phaseStartedMs >= phaseRunMs) {
+    motor4Job.goingForward = !motor4Job.goingForward;
+    motor4Job.phaseStartedMs = nowMs;
+  }
+  if (nowUs - motor4Job.lastStepUs >= 2200) {
+    if (motor4Job.goingForward) {
+      stepMotor4Forward();
+    } else {
+      stepMotor4Backward();
+    }
     motor4Job.lastStepUs = nowUs;
   }
 
@@ -1400,8 +1456,6 @@ void serviceLocalMotor4() {
       ++motor4Job.dispensedCount;
       motor4Job.sensorArmed = false;
       motor4Job.detectStartedMs = 0;
-      motor4Job.coinDeadlineMs = nowMs + DISPENSE_TIMEOUT_MS;
-      motor4Job.settleUntilMs = nowMs + POST_DETECT_SETTLE_MS;
       Serial.print(F("EVENT motor=4 dispensed="));
       Serial.println(motor4Job.dispensedCount);
 
@@ -1444,6 +1498,167 @@ void handlePayoutCommand(int amount) {
   if (remaining != 0) {
     Serial.print(F("WARN payout remainder="));
     Serial.println(remaining);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawal state machine – dispenses bills from storage via spinner reverse.
+// ---------------------------------------------------------------------------
+
+bool calculateWithdrawBills(int amount, uint8_t counts[5]) {
+  // counts[0..4] map to slots 0..4 (PHP20, 50, 100, 500, 1000).
+  // Returns the remainder that cannot be covered by bills (0-19).
+  for (uint8_t i = 0; i < 5; ++i) counts[i] = 0;
+  if (amount <= 0) return false;
+
+  counts[4] = static_cast<uint8_t>(amount / 1000); amount %= 1000;
+  counts[3] = static_cast<uint8_t>(amount / 500);  amount %= 500;
+  counts[2] = static_cast<uint8_t>(amount / 100);  amount %= 100;
+  counts[1] = static_cast<uint8_t>(amount / 50);   amount %= 50;
+  counts[0] = static_cast<uint8_t>(amount / 20);   amount %= 20;
+  // Remainder (0-19) handled separately by coin payout motors.
+  return true;
+}
+
+void advanceWithdrawToNextSlot() {
+  uint8_t next = withdrawJob.currentSlot + 1;
+  while (next < 5 && withdrawJob.slotCounts[next] == 0) {
+    ++next;
+  }
+  if (next >= 5) {
+    withdrawJob.active = false;
+    withdrawJob.stage = WD_IDLE;
+    Serial.println(F("WITHDRAW DONE"));
+    return;
+  }
+  withdrawJob.currentSlot = next;
+  withdrawJob.billsLeft = withdrawJob.slotCounts[next];
+  withdrawJob.stage = WD_BILL_GAP;
+  withdrawJob.stageStartedMs = millis();
+  Serial.print(F("WITHDRAW NEXT slot="));
+  Serial.println(next + 1);
+}
+
+bool startWithdrawJob(int amount) {
+  if (withdrawJob.active) { Serial.println(F("ERR withdraw-busy")); return false; }
+  if (!motionArmed)        { Serial.println(F("ERR withdraw-disarmed")); return false; }
+  if (!SERVOS_ENABLED)     { Serial.println(F("ERR withdraw-servos-disabled")); return false; }
+  if (billRoute.active)    { Serial.println(F("ERR withdraw-routing-busy")); return false; }
+
+  uint8_t counts[5] = {};
+  if (!calculateWithdrawBills(amount, counts)) {
+    Serial.print(F("ERR withdraw-invalid amount="));
+    Serial.println(amount);
+    return false;
+  }
+
+  // Calculate sub-20 remainder to be dispensed as coins via stepper motors.
+  const int coinRemainder = amount
+    - counts[4] * 1000 - counts[3] * 500
+    - counts[2] * 100  - counts[1] * 50
+    - counts[0] * 20;
+  if (coinRemainder > 0) {
+    handlePayoutCommand(coinRemainder);
+  }
+
+  if (elevatorParkActive) stopElevatorPark();
+  // Withdrawal mode must never drive elevator or CH6 output motor.
+  setLiftCommand(SERVO_STOP_CMD);
+  stopElevatorOutMotor();
+
+  withdrawJob = {};
+  for (uint8_t i = 0; i < 5; ++i) withdrawJob.slotCounts[i] = counts[i];
+  withdrawJob.active = true;
+  withdrawJob.startedMs = millis();
+  withdrawJob.stageStartedMs = withdrawJob.startedMs;
+
+  // Find first slot with bills
+  withdrawJob.currentSlot = 0;
+  while (withdrawJob.currentSlot < 5 && withdrawJob.slotCounts[withdrawJob.currentSlot] == 0) {
+    ++withdrawJob.currentSlot;
+  }
+
+  Serial.print(F("WITHDRAW START amount="));
+  Serial.print(amount);
+  Serial.print(F(" 20x")); Serial.print(counts[0]);
+  Serial.print(F(" 50x")); Serial.print(counts[1]);
+  Serial.print(F(" 100x")); Serial.print(counts[2]);
+  Serial.print(F(" 500x")); Serial.print(counts[3]);
+  Serial.print(F(" 1000x")); Serial.print(counts[4]);
+  if (coinRemainder > 0) {
+    Serial.print(F(" coins="));
+    Serial.print(coinRemainder);
+  }
+  Serial.println();
+
+  withdrawJob.billsLeft = withdrawJob.slotCounts[withdrawJob.currentSlot];
+  setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+  withdrawJob.stage = WD_SPIN_BILL;
+  withdrawJob.stageStartedMs = withdrawJob.startedMs;
+  Serial.print(F("WITHDRAW SPIN slot="));
+  Serial.print(withdrawJob.currentSlot + 1);
+  Serial.print(F(" bills_left=")); Serial.println(withdrawJob.billsLeft);
+  return true;
+}
+
+void serviceWithdrawJob() {
+  if (!withdrawJob.active) return;
+  const unsigned long nowMs = millis();
+
+  // Safety: keep elevator and CH6 stopped during withdrawal.
+  setLiftCommand(SERVO_STOP_CMD);
+  stopElevatorOutMotor();
+
+  if (nowMs - withdrawJob.startedMs > WITHDRAW_TOTAL_TIMEOUT_MS) {
+    stopStorageMotor(withdrawJob.currentSlot);
+    setLiftCommand(SERVO_STOP_CMD);
+    withdrawJob = {};
+    Serial.println(F("WITHDRAW ERR timeout"));
+    return;
+  }
+
+  switch (withdrawJob.stage) {
+    case WD_MOVE_TO_SLOT: {
+      // Not used in storage-only withdrawal mode.
+      withdrawJob.stage = WD_BILL_GAP;
+      withdrawJob.stageStartedMs = nowMs;
+      break;
+    }
+    case WD_SPIN_BILL: {
+      if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_SPIN_MS) {
+        stopStorageMotor(withdrawJob.currentSlot);
+        --withdrawJob.billsLeft;
+        Serial.print(F("WITHDRAW EJECTED slot="));
+        Serial.print(withdrawJob.currentSlot + 1);
+        Serial.print(F(" remaining=")); Serial.println(withdrawJob.billsLeft);
+        if (withdrawJob.billsLeft > 0) {
+          withdrawJob.stage = WD_BILL_GAP;
+          withdrawJob.stageStartedMs = nowMs;
+        } else {
+          advanceWithdrawToNextSlot();
+        }
+      }
+      break;
+    }
+    case WD_BILL_GAP: {
+      if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_INTER_BILL_GAP_MS) {
+        setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+        withdrawJob.stage = WD_SPIN_BILL;
+        withdrawJob.stageStartedMs = nowMs;
+        Serial.print(F("WITHDRAW SPIN slot="));
+        Serial.print(withdrawJob.currentSlot + 1);
+        Serial.print(F(" bills_left=")); Serial.println(withdrawJob.billsLeft);
+      }
+      break;
+    }
+    case WD_MOVE_HOME: {
+      // Not used in storage-only withdrawal mode.
+      withdrawJob.active = false;
+      withdrawJob.stage = WD_IDLE;
+      Serial.println(F("WITHDRAW DONE"));
+      break;
+    }
+    default: break;
   }
 }
 
@@ -1527,6 +1742,12 @@ void handleUsbCommand(String command) {
   if (command.startsWith(F("PAYOUT "))) {
     const int amount = command.substring(7).toInt();
     handlePayoutCommand(amount);
+    return;
+  }
+
+  if (command.startsWith(F("WITHDRAW "))) {
+    const int amount = command.substring(9).toInt();
+    startWithdrawJob(amount);
     return;
   }
 
@@ -1746,7 +1967,7 @@ void setup() {
   pinMode(M4_IN4_PIN, OUTPUT);
   pinMode(IR4_PIN, INPUT);
   pinMode(BILL_PIN, INPUT_PULLUP);
-  pinMode(COIN_PIN, INPUT);
+  pinMode(COIN_PIN, INPUT_PULLUP);
   for (uint8_t index = 0; index < 5; ++index) {
     pinMode(IR5_PINS[index], INPUT);
     ir5LastState[index] = isDetected(digitalRead(IR5_PINS[index]));
@@ -1835,6 +2056,7 @@ void loop() {
   serviceLiftHardLimits();
   serviceLocalMotor4();
   startNextQueuedTask();
+  serviceWithdrawJob();
 
   const unsigned long nowMs = millis();
   if (STATUS_VERBOSE_LOG && (nowMs - lastStatusPrintMs >= STATUS_PRINT_MS)) {
