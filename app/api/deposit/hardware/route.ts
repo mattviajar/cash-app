@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { enqueueDeposit } from '../queue'
+import { prisma } from '@/lib/prisma'
 
 const BUTTON_AMOUNTS: Record<string, number> = {
   add10: 10,
@@ -25,6 +25,8 @@ export async function POST(request: Request) {
     )
   }
 
-  const item = enqueueDeposit(amount)
+  const item = await prisma.depositQueue.create({
+    data: { amount: Math.round(amount * 100) / 100 },
+  })
   return NextResponse.json({ ok: true, item })
 }
