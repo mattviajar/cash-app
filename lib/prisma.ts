@@ -4,10 +4,9 @@ import { PrismaPg } from '@prisma/adapter-pg'
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient }
 
 function createPrismaClient() {
-  // Strip pgbouncer=true — transaction mode disables prepared statements
-  // which pg driver requires. Port 5432 on Supabase pooler = session mode.
-  const rawUrl = process.env.DATABASE_URL!
-  const connectionString = rawUrl.replace('?pgbouncer=true', '').replace('&pgbouncer=true', '')
+  // Use DIRECT_URL (port 5432, session mode) — pg driver needs prepared statements
+  // which are disabled in PgBouncer transaction mode (port 6543 / DATABASE_URL).
+  const connectionString = (process.env.DIRECT_URL ?? process.env.DATABASE_URL)!
   const adapter = new PrismaPg({ connectionString })
   return new PrismaClient({ adapter })
 }
