@@ -3,9 +3,9 @@
 
 namespace {
 
-constexpr long SERIAL_BAUD = 115200;
+constexpr long SERIAL_BAUD = 9600;
 constexpr bool ACTIVE_LOW = true;
-constexpr bool MOTORS_ENABLED = false;
+constexpr bool MOTORS_ENABLED = true;
 constexpr unsigned long DETECT_HOLD_MS = 120;
 constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
