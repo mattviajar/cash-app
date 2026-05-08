@@ -364,12 +364,15 @@ export default function DashboardPage() {
     if (!isHydrated || role !== 'kid' || !kidName || !kidDepositModalOpen) return
 
     let cancelled = false
+    let running = false
     const pollDeposits = async () => {
+      if (running) return
+      running = true
       try {
         const res = await fetch(`/api/deposit?since=${kidLastSeenDepositIdRef.current}`, { cache: 'no-store' })
-        if (!res.ok) return
+        if (!res.ok) { running = false; return }
         const data = await res.json() as { deposits: { id: number; amount: number }[] }
-        if (!data.deposits || data.deposits.length === 0) return
+        if (!data.deposits || data.deposits.length === 0) { running = false; return }
         kidLastSeenDepositIdRef.current = Math.max(
           kidLastSeenDepositIdRef.current,
           ...data.deposits.map((d) => d.id)
@@ -384,6 +387,7 @@ export default function DashboardPage() {
       } catch {
         // Silently ignore network errors
       }
+      running = false
     }
 
     void pollDeposits()
@@ -400,12 +404,15 @@ export default function DashboardPage() {
     if (!isHydrated || role !== 'parent' || !pendingDepositKid) return
 
     let cancelled = false
+    let running = false
     const pollDeposits = async () => {
+      if (running) return
+      running = true
       try {
         const res = await fetch(`/api/deposit?since=${parentLastSeenDepositIdRef.current}`, { cache: 'no-store' })
-        if (!res.ok) return
+        if (!res.ok) { running = false; return }
         const data = await res.json() as { deposits: { id: number; amount: number }[] }
-        if (!data.deposits || data.deposits.length === 0 || cancelled) return
+        if (!data.deposits || data.deposits.length === 0 || cancelled) { running = false; return }
         parentLastSeenDepositIdRef.current = Math.max(
           parentLastSeenDepositIdRef.current,
           ...data.deposits.map((d) => d.id)
@@ -429,6 +436,7 @@ export default function DashboardPage() {
           setPendingDepositError('Waiting for hardware bridge...')
         }
       }
+      running = false
     }
 
     void pollDeposits()
