@@ -2078,8 +2078,12 @@ void handleUnoLine(const String& line) {
     unoOnline = true;
     return;
   }
-  if (line.startsWith(F("IR4_EDGE level="))) {
-    unoIr4IsLow = line.endsWith(F("LOW"));
+  if (line == F("IR 20P BLOCK")) {
+    unoIr4IsLow = true;   // A3 blocked = coin present (ACTIVE_LOW)
+    return;
+  }
+  if (line == F("IR 20P CLEAR")) {
+    unoIr4IsLow = false;
     return;
   }
   if (line.startsWith(F("OK DISPENSE"))) {
