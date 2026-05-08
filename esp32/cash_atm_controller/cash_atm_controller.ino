@@ -333,8 +333,8 @@ bool isDetected(int rawValue) {
 
 void writeMotor4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   digitalWrite(M4_IN1_PIN, a);
-  digitalWrite(M4_IN2_PIN, b);
-  digitalWrite(M4_IN3_PIN, c);
+  digitalWrite(M4_IN2_PIN, c);
+  digitalWrite(M4_IN3_PIN, b);
   digitalWrite(M4_IN4_PIN, d);
 }
 
