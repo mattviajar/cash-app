@@ -105,6 +105,13 @@ constexpr uint8_t HALF_STEP[8][4] = {
   {1, 0, 0, 1},
 };
 
+constexpr uint8_t M4_FULL_STEP[4][4] = {
+  {1, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 1},
+  {1, 0, 0, 1},
+};
+
 struct PulseMap {
   uint8_t pulses;
   float amount;
@@ -344,22 +351,22 @@ void releaseMotor4() {
 
 void stepMotor4Forward() {
   writeMotor4(
-    HALF_STEP[motor4.sequenceIndex][0],
-    HALF_STEP[motor4.sequenceIndex][1],
-    HALF_STEP[motor4.sequenceIndex][2],
-    HALF_STEP[motor4.sequenceIndex][3]
+    M4_FULL_STEP[motor4.sequenceIndex][0],
+    M4_FULL_STEP[motor4.sequenceIndex][1],
+    M4_FULL_STEP[motor4.sequenceIndex][2],
+    M4_FULL_STEP[motor4.sequenceIndex][3]
   );
-  motor4.sequenceIndex = (motor4.sequenceIndex + 7) & 0x07;
+  motor4.sequenceIndex = (motor4.sequenceIndex + 3) & 0x03;
 }
 
 void stepMotor4Backward() {
   writeMotor4(
-    HALF_STEP[motor4.sequenceIndex][0],
-    HALF_STEP[motor4.sequenceIndex][1],
-    HALF_STEP[motor4.sequenceIndex][2],
-    HALF_STEP[motor4.sequenceIndex][3]
+    M4_FULL_STEP[motor4.sequenceIndex][0],
+    M4_FULL_STEP[motor4.sequenceIndex][1],
+    M4_FULL_STEP[motor4.sequenceIndex][2],
+    M4_FULL_STEP[motor4.sequenceIndex][3]
   );
-  motor4.sequenceIndex = (motor4.sequenceIndex + 1) & 0x07;
+  motor4.sequenceIndex = (motor4.sequenceIndex + 1) & 0x03;
 }
 
 float mapPulseCount(const PulseMap* table, size_t length, uint8_t pulses) {
@@ -911,6 +918,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.active = true;
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
+  motor4.sequenceIndex = 0;
   motor4Job.sensorArmed = !isDetected(unoIr4IsLow ? LOW : HIGH);
   motor4Job.goingForward = false;
   motor4Job.startedMs = millis();
