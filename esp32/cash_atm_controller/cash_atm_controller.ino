@@ -261,6 +261,7 @@ bool ir5LastState[5] = {false, false, false, false, false};
 unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
+bool unoIr4IsLow = false;  // A3 level reported by Uno via IR4_EDGE
 bool motionArmed = MOTION_ARMED_DEFAULT;
 bool pulseDebugEnabled = false;
 InputDiag inputDiag = {false, 0, nullptr, true, 0, 0, 0, 0};
@@ -910,7 +911,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.active = true;
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
-  motor4Job.sensorArmed = !isDetected(digitalRead(IR4_PIN));
+  motor4Job.sensorArmed = !isDetected(unoIr4IsLow ? LOW : HIGH);
   motor4Job.goingForward = false;
   motor4Job.startedMs = millis();
   motor4Job.coinDeadlineMs = motor4Job.startedMs + JOB_MAX_RUNTIME_MS;
@@ -1230,7 +1231,7 @@ void printStatus() {
     Serial.print(F("idle"));
   }
   Serial.print(F(" ir4="));
-  Serial.print(digitalRead(IR4_PIN));
+  Serial.print(unoIr4IsLow ? 0 : 1);
   Serial.print(F(" coinPin="));
   Serial.print(digitalRead(COIN_PIN));
   Serial.print(F(" billPin="));
@@ -1587,7 +1588,7 @@ void serviceLocalMotor4() {
     motor4Job.lastStepUs = nowUs;
   }
 
-  const bool detected = isDetected(digitalRead(IR4_PIN));
+  const bool detected = isDetected(unoIr4IsLow ? LOW : HIGH);
   if (!motor4Job.sensorArmed) {
     if (!detected) {
       motor4Job.sensorArmed = true;
@@ -2075,6 +2076,10 @@ void handleUnoLine(const String& line) {
   }
   if (line.startsWith(F("STATUS "))) {
     unoOnline = true;
+    return;
+  }
+  if (line.startsWith(F("IR4_EDGE level="))) {
+    unoIr4IsLow = line.endsWith(F("LOW"));
     return;
   }
   if (line.startsWith(F("OK DISPENSE"))) {

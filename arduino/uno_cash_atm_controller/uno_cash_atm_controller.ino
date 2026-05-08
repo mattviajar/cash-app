@@ -11,6 +11,7 @@ constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
 constexpr unsigned long COIN_TIMEOUT_MS = 12000;
 constexpr unsigned long STATUS_PRINT_MS = 500;
+constexpr uint8_t IR4_PIN = 17;  // A3 — coin motor IR sensor
 
 constexpr uint8_t HALF_STEP[8][4] = {
   {1, 0, 0, 0},
@@ -61,6 +62,7 @@ DispenseJob currentJob = {};
 String commandBuffer;
 unsigned long startupMs = 0;
 unsigned long lastStatusPrintMs = 0;
+bool ir4LastLevel = HIGH;
 
 bool isDetected(int rawValue) {
   return ACTIVE_LOW ? (rawValue == LOW) : (rawValue == HIGH);
@@ -122,7 +124,18 @@ void printStatus() {
     Serial.print('=');
     Serial.print(digitalRead(MOTORS[motorIndex].irPin));
   }
+  Serial.print(F(" ir4="));
+  Serial.print(digitalRead(IR4_PIN));
   Serial.println();
+}
+
+void serviceIr4Edge() {
+  const bool level = digitalRead(IR4_PIN);
+  if (level != ir4LastLevel) {
+    ir4LastLevel = level;
+    Serial.print(F("IR4_EDGE level="));
+    Serial.println(level == LOW ? F("LOW") : F("HIGH"));
+  }
 }
 
 void finishJob() {
@@ -321,6 +334,8 @@ void setup() {
     pinMode(MOTORS[motorIndex].irPin, INPUT);
     releaseMotor(motorIndex);
   }
+  pinMode(IR4_PIN, INPUT);
+  ir4LastLevel = digitalRead(IR4_PIN);
 
   startupMs = millis();
   lastStatusPrintMs = startupMs;
@@ -335,6 +350,7 @@ void setup() {
 void loop() {
   readSerialCommands();
   serviceDispenseJob();
+  serviceIr4Edge();
 
   const unsigned long nowMs = millis();
   if (nowMs - lastStatusPrintMs >= STATUS_PRINT_MS) {
