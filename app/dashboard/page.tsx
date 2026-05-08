@@ -690,7 +690,8 @@ export default function DashboardPage() {
   const startParentDepositFlow = (username: string) => {
     // Flush any stale deposits from a previous session before starting a new one.
     void fetch('/api/deposit/clear', { method: 'POST' })
-    parentLastSeenDepositIdRef.current = 0
+    // Do NOT reset ref to 0 — keep the current max ID so that
+    // polling only picks up genuinely new deposits (higher IDs).
 
     setPendingDepositKid(username)
     setPendingDepositTarget(0)
@@ -780,7 +781,10 @@ export default function DashboardPage() {
             type="button"
             onClick={() => {
               void fetch('/api/deposit/clear', { method: 'POST' })
-              kidLastSeenDepositIdRef.current = 0
+              // Do NOT reset ref to 0 — keep the current max ID so that
+              // polling only picks up genuinely new deposits (higher IDs).
+              // Resetting to 0 caused a race where old deposits were re-read
+              // before the clear request completed.
               setPendingDepositReceived(0)
               setDepositCountdown(30)
               setKidDepositModalOpen(true)
