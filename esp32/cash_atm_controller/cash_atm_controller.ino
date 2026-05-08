@@ -140,7 +140,7 @@ constexpr char WIFI_SSID[] = "VSupreme";
 constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
 constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
 constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
-constexpr unsigned long COMMAND_POLL_MS = 1200;
+constexpr unsigned long COMMAND_POLL_MS = 10000;
 
 struct MotorState {
   int sequenceIndex;
@@ -463,6 +463,17 @@ void pollRemoteCommands() {
   if (COMMAND_API_URL[0] == '\0') {
     return;
   }
+
+  // Never block pulse-sensitive paths while acceptor pulses are in progress.
+  if (coinInput.pulseActive || billInput.pulseActive || coinInput.pending || billInput.pending) {
+    return;
+  }
+
+  // Avoid extra network activity while local motion tasks are active.
+  if (motor4Job.active || withdrawJob.active || billRoute.active) {
+    return;
+  }
+
   if (!ensureWifi()) {
     return;
   }
@@ -477,8 +488,8 @@ void pollRemoteCommands() {
   secureClient.setInsecure(); // skip cert verification
 
   HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
+  http.setConnectTimeout(250);
+  http.setTimeout(250);
 
   String url = String(COMMAND_API_URL);
   if (url.indexOf('?') >= 0) {
@@ -2203,7 +2214,6 @@ void setup() {
 }
 
 void loop() {
-  pollRemoteCommands();
   readUsbCommands();
   readUnoLines();
   serviceInputDiag();
@@ -2225,6 +2235,7 @@ void loop() {
   serviceLocalMotor4();
   startNextQueuedTask();
   serviceWithdrawJob();
+  pollRemoteCommands();
 
   const unsigned long nowMs = millis();
   if (STATUS_VERBOSE_LOG && (nowMs - lastStatusPrintMs >= STATUS_PRINT_MS)) {
