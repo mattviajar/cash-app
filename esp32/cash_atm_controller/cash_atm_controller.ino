@@ -262,6 +262,7 @@ unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
 bool unoIr4IsLow = false;  // A3 level reported by Uno via IR4_EDGE
+uint8_t m4PinMap[4] = {0, 1, 2, 3}; // maps step columns → IN1/IN2/IN3/IN4 (try different orderings to find working wiring)
 bool motionArmed = MOTION_ARMED_DEFAULT;
 bool pulseDebugEnabled = false;
 InputDiag inputDiag = {false, 0, nullptr, true, 0, 0, 0, 0};
@@ -332,10 +333,12 @@ bool isDetected(int rawValue) {
 }
 
 void writeMotor4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-  digitalWrite(M4_IN1_PIN, a);
-  digitalWrite(M4_IN2_PIN, b);
-  digitalWrite(M4_IN3_PIN, c);
-  digitalWrite(M4_IN4_PIN, d);
+  const uint8_t coils[4] = {a, b, c, d};
+  const uint8_t pins[4] = {M4_IN1_PIN, M4_IN2_PIN, M4_IN3_PIN, M4_IN4_PIN};
+  digitalWrite(pins[0], coils[m4PinMap[0]]);
+  digitalWrite(pins[1], coils[m4PinMap[1]]);
+  digitalWrite(pins[2], coils[m4PinMap[2]]);
+  digitalWrite(pins[3], coils[m4PinMap[3]]);
 }
 
 void releaseMotor4() {
@@ -977,6 +980,8 @@ void printHelp() {
   Serial.println(F("  PULSEDEBUG"));
   Serial.println(F("  DIAGBILL"));
   Serial.println(F("  DIAGCOIN"));
+  Serial.println(F("  M4COIL a b c d   (raw 0/1 to IN1..IN4)"));
+  Serial.println(F("  M4PINMAP p0 p1 p2 p3 (remap step cols 0-3 to IN1..IN4)"));
   Serial.println(F("  SERVO <channel> <angle>"));
   Serial.println(F("  HOME"));
   Serial.println(F("  STOP"));
@@ -1874,6 +1879,37 @@ void handleUsbCommand(String command) {
   }
   if (command == F("DIAGCOIN")) {
     startInputDiag(COIN_PIN, "coin", 10000);
+    return;
+  }
+
+  // M4COIL a b c d — drive raw 0/1 to IN1..IN4 for hardware verification
+  if (command.startsWith(F("M4COIL "))) {
+    int v[4] = {0, 0, 0, 0};
+    sscanf(command.c_str() + 7, "%d %d %d %d", &v[0], &v[1], &v[2], &v[3]);
+    writeMotor4(v[0] & 1, v[1] & 1, v[2] & 1, v[3] & 1);
+    Serial.print(F("OK M4COIL "));
+    Serial.print(v[0]); Serial.print(' ');
+    Serial.print(v[1]); Serial.print(' ');
+    Serial.print(v[2]); Serial.print(' ');
+    Serial.println(v[3]);
+    return;
+  }
+
+  // M4PINMAP p0 p1 p2 p3 — remap which step-sequence column drives each physical IN pin
+  // Default: 0 1 2 3  Try: 0 2 1 3 / 0 3 2 1 / 1 0 3 2 / etc.
+  if (command.startsWith(F("M4PINMAP "))) {
+    int p[4] = {0, 1, 2, 3};
+    sscanf(command.c_str() + 9, "%d %d %d %d", &p[0], &p[1], &p[2], &p[3]);
+    bool valid = true;
+    for (int i = 0; i < 4 && valid; ++i) if (p[i] < 0 || p[i] > 3) valid = false;
+    if (!valid) { Serial.println(F("ERR M4PINMAP values must be 0-3")); return; }
+    for (int i = 0; i < 4; ++i) m4PinMap[i] = static_cast<uint8_t>(p[i]);
+    motor4.sequenceIndex = 0;
+    Serial.print(F("OK M4PINMAP "));
+    Serial.print(m4PinMap[0]); Serial.print(' ');
+    Serial.print(m4PinMap[1]); Serial.print(' ');
+    Serial.print(m4PinMap[2]); Serial.print(' ');
+    Serial.println(m4PinMap[3]);
     return;
   }
 
