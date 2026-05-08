@@ -22,8 +22,8 @@ export async function POST(request: Request) {
     })
     return NextResponse.json({ ok: true, item })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    return NextResponse.json({ error: 'DB error', detail: msg }, { status: 500 })
+    const detail = JSON.stringify(e, Object.getOwnPropertyNames(e as object))
+    return NextResponse.json({ error: 'DB error', detail }, { status: 500 })
   }
 }
 
@@ -47,7 +47,7 @@ export async function GET(request: Request) {
     })
     return NextResponse.json({ deposits })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    return NextResponse.json({ error: 'DB error', detail: msg }, { status: 500 })
+    const detail = JSON.stringify(e, Object.getOwnPropertyNames(e as object))
+    return NextResponse.json({ error: 'DB error', detail }, { status: 500 })
   }
 }
