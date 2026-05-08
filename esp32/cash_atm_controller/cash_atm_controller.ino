@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Wire.h>
 
 namespace {
@@ -135,9 +136,11 @@ constexpr PulseMap BILL_MAP[] = {
   {100, 1000.0f},
 };
 
-constexpr char WIFI_SSID[] = "";
-constexpr char WIFI_PASSWORD[] = "";
-constexpr char DEPOSIT_API_URL[] = "";
+constexpr char WIFI_SSID[] = "VSupreme";
+constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
+constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
+constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
+constexpr unsigned long COMMAND_POLL_MS = 1200;
 
 struct MotorState {
   int sequenceIndex;
@@ -266,6 +269,7 @@ String usbCommandBuffer;
 String unoLineBuffer;
 unsigned long lastStatusPrintMs = 0;
 unsigned long lastWifiAttemptMs = 0;
+unsigned long lastCommandPollMs = 0;
 
 HardwareSerial UnoSerial(2);
 uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
@@ -280,6 +284,7 @@ uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
 
 void stopElevatorPark();
 void startElevatorPark(uint8_t slot);
+void handleUsbCommand(String command);
 
 void pcaWriteRegister(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(PCA9685_ADDRESS);
@@ -409,17 +414,148 @@ void postDeposit(float amount, const char* source, uint8_t pulses) {
   Serial.println(amount, 2);
 
   if (!ensureWifi()) {
+    Serial.println(F("ERR: WiFi not connected"));
     return;
   }
 
+  Serial.print(F("WiFi status: "));
+  Serial.print(WiFi.status());
+  Serial.print(F(" IP: "));
+  Serial.println(WiFi.localIP());
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); // skip cert verification
+
   HTTPClient http;
-  http.begin(DEPOSIT_API_URL);
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  
+  Serial.print(F("POSTing to: "));
+  Serial.println(DEPOSIT_API_URL);
+  
+  if (!http.begin(secureClient, DEPOSIT_API_URL)) {
+    Serial.println(F("ERR: http.begin() failed"));
+    http.end();
+    return;
+  }
+  
   http.addHeader("Content-Type", "application/json");
   const String body = String("{\"amount\":") + String(amount, 2) + "}";
+  
+  Serial.print(F("POST body: "));
+  Serial.println(body);
+  
   const int status = http.POST(body);
   Serial.print(F("HTTP deposit status="));
   Serial.println(status);
+  
+  if (status < 0) {
+    Serial.print(F("ERR: HTTP error: "));
+    Serial.println(http.errorToString(status));
+  } else if (status == 200) {
+    Serial.println(F("OK: deposit received by server"));
+  }
+  
   http.end();
+}
+
+void pollRemoteCommands() {
+  if (COMMAND_API_URL[0] == '\0') {
+    return;
+  }
+  if (!ensureWifi()) {
+    return;
+  }
+
+  const unsigned long nowMs = millis();
+  if (nowMs - lastCommandPollMs < COMMAND_POLL_MS) {
+    return;
+  }
+  lastCommandPollMs = nowMs;
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); // skip cert verification
+
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+
+  String url = String(COMMAND_API_URL);
+  if (url.indexOf('?') >= 0) {
+    url += "&consume=true";
+  } else {
+    url += "?consume=true";
+  }
+
+  if (!http.begin(secureClient, url)) {
+    Serial.println(F("ERR: command http.begin() failed"));
+    http.end();
+    return;
+  }
+
+  const int status = http.GET();
+  if (status != 200) {
+    if (status < 0) {
+      Serial.print(F("ERR: command HTTP error: "));
+      Serial.println(http.errorToString(status));
+    }
+    http.end();
+    return;
+  }
+
+  const String payload = http.getString();
+  http.end();
+
+  const int keyIndex = payload.indexOf("\"commands\"");
+  if (keyIndex < 0) {
+    return;
+  }
+  const int listStart = payload.indexOf('[', keyIndex);
+  const int listEnd = payload.indexOf(']', listStart);
+  if (listStart < 0 || listEnd < 0 || listEnd <= listStart) {
+    return;
+  }
+
+  int scan = listStart + 1;
+  while (scan < listEnd) {
+    const int open = payload.indexOf('"', scan);
+    if (open < 0 || open >= listEnd) {
+      break;
+    }
+
+    String cmd;
+    bool escaping = false;
+    int close = open + 1;
+    for (; close < listEnd; ++close) {
+      const char ch = payload.charAt(close);
+      if (escaping) {
+        cmd += ch;
+        escaping = false;
+        continue;
+      }
+      if (ch == '\\') {
+        escaping = true;
+        continue;
+      }
+      if (ch == '"') {
+        break;
+      }
+      cmd += ch;
+    }
+
+    if (close >= listEnd) {
+      break;
+    }
+
+    cmd.trim();
+    if (cmd.length() > 0) {
+      Serial.print(F("REMOTE CMD: "));
+      Serial.println(cmd);
+      handleUsbCommand(cmd);
+    }
+
+    scan = close + 1;
+  }
 }
 
 void setServoAngle(uint8_t channel, uint8_t angle) {
@@ -1882,6 +2018,19 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  if (command.startsWith(F("TESTDEPOSIT "))) {
+    const float amount = command.substring(12).toFloat();
+    if (amount > 0 && amount <= 10000) {
+      Serial.print(F("TEST: manually posting deposit "));
+      Serial.println(amount, 2);
+      postDeposit(amount, "TEST", 1);
+      Serial.println(F("OK TESTDEPOSIT"));
+    } else {
+      Serial.println(F("ERR testdeposit: amount 0.01 to 10000"));
+    }
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
@@ -2032,10 +2181,29 @@ void setup() {
     }
   }
 
+  // Initiate Wi-Fi connection on boot
+  if (WIFI_SSID[0] != '\0' && DEPOSIT_API_URL[0] != '\0') {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print(F("Connecting to WiFi "));
+    Serial.println(WIFI_SSID);
+    for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
+      delay(500);
+      Serial.print(".");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print(F("\nWiFi connected: "));
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println(F("\nWiFi connection timeout"));
+    }
+  }
+
   UnoSerial.println(F("PING"));
 }
 
 void loop() {
+  pollRemoteCommands();
   readUsbCommands();
   readUnoLines();
   serviceInputDiag();
