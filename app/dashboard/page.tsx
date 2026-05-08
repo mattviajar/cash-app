@@ -687,11 +687,18 @@ export default function DashboardPage() {
       })
   }
 
-  const startParentDepositFlow = (username: string) => {
-    // Flush any stale deposits from a previous session before starting a new one.
-    void fetch('/api/deposit/clear', { method: 'POST' })
-    // Do NOT reset ref to 0 — keep the current max ID so that
-    // polling only picks up genuinely new deposits (higher IDs).
+  const startParentDepositFlow = async (username: string) => {
+    // Snapshot current max ID, then clear — so only deposits AFTER this
+    // moment are counted.
+    try {
+      const res = await fetch('/api/deposit', { cache: 'no-store' })
+      const data = await res.json() as { deposits: { id: number }[] }
+      const maxId = data.deposits?.length > 0
+        ? Math.max(...data.deposits.map((d) => d.id))
+        : parentLastSeenDepositIdRef.current
+      parentLastSeenDepositIdRef.current = maxId
+    } catch { /* keep existing ref */ }
+    await fetch('/api/deposit/clear', { method: 'POST' })
 
     setPendingDepositKid(username)
     setPendingDepositTarget(0)
@@ -780,14 +787,22 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => {
-              void fetch('/api/deposit/clear', { method: 'POST' })
-              // Do NOT reset ref to 0 — keep the current max ID so that
-              // polling only picks up genuinely new deposits (higher IDs).
-              // Resetting to 0 caused a race where old deposits were re-read
-              // before the clear request completed.
-              setPendingDepositReceived(0)
-              setDepositCountdown(30)
-              setKidDepositModalOpen(true)
+              // Snapshot current max deposit ID first, then clear.
+              // This ensures polling only picks up deposits created AFTER
+              // the button was tapped, not old ones still in the DB.
+              void (async () => {
+                try {
+                  const res = await fetch('/api/deposit', { cache: 'no-store' })
+                  const data = await res.json() as { deposits: { id: number }[] }
+                  if (data.deposits?.length > 0) {
+                    kidLastSeenDepositIdRef.current = Math.max(...data.deposits.map((d) => d.id))
+                  }
+                } catch { /* keep existing ref */ }
+                await fetch('/api/deposit/clear', { method: 'POST' })
+                setPendingDepositReceived(0)
+                setDepositCountdown(30)
+                setKidDepositModalOpen(true)
+              })()
             }}
             className="rounded-2xl bg-gradient-to-r from-emerald-500 via-green-500 to-lime-500 text-white px-8 py-4 font-inter font-extrabold text-lg uppercase tracking-widest shadow-xl shadow-emerald-300/60 ring-2 ring-emerald-200 animate-pulse hover:scale-105 hover:animate-none active:scale-95 transition"
           >
