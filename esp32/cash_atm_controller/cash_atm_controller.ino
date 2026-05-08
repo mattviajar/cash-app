@@ -920,6 +920,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.lastStepUs = micros();
   Serial.print(F("OK DISPENSE motor=4 count="));
   Serial.println(count);
+  Serial.println(F("M4 PHASE=BWD"));
 }
 
 void startNextQueuedTask() {
@@ -1578,6 +1579,8 @@ void serviceLocalMotor4() {
   if (nowMs - motor4Job.phaseStartedMs >= phaseRunMs) {
     motor4Job.goingForward = !motor4Job.goingForward;
     motor4Job.phaseStartedMs = nowMs;
+    Serial.print(F("M4 PHASE="));
+    Serial.println(motor4Job.goingForward ? F("FWD") : F("BWD"));
   }
   if (nowUs - motor4Job.lastStepUs >= 2200) {
     if (motor4Job.goingForward) {
