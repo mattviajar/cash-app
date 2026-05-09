@@ -25,6 +25,7 @@ constexpr bool ACTIVE_LOW = true;
 // Coin/bill acceptor outputs are typically open-collector and pull LOW on pulse.
 constexpr bool PULSE_ACTIVE_LOW = true;
 constexpr unsigned long DETECT_HOLD_MS = 10;
+constexpr unsigned long M4_DETECT_HOLD_MS = 4;
 constexpr unsigned long IR5_DETECT_HOLD_MS = 140;
 constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
@@ -1632,7 +1633,7 @@ void serviceLocalMotor4() {
   if (detected) {
     if (motor4Job.detectStartedMs == 0) {
       motor4Job.detectStartedMs = nowMs;
-    } else if (nowMs - motor4Job.detectStartedMs >= DETECT_HOLD_MS) {
+    } else if (nowMs - motor4Job.detectStartedMs >= M4_DETECT_HOLD_MS) {
       ++motor4Job.dispensedCount;
       motor4Job.sensorArmed = false;
       motor4Job.detectStartedMs = 0;
