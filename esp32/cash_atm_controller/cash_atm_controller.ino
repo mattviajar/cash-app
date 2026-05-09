@@ -39,6 +39,7 @@ constexpr uint8_t M4_IN1_PIN = 18;
 constexpr uint8_t M4_IN2_PIN = 19;
 constexpr uint8_t M4_IN3_PIN = 23;
 constexpr uint8_t M4_IN4_PIN = 27;  // moved from GPIO13 (unreliable); GPIO27 freed from IR4 (now on Uno A3)
+constexpr uint8_t M4_IR_PIN = 13;   // local IR for motor 4 (active-low)
 
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
@@ -260,7 +261,6 @@ bool ir5LastState[5] = {false, false, false, false, false};
 unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
-bool unoIr4IsLow = false;  // A3 level reported by Uno via IR4_EDGE
 uint8_t m4PinMap[4] = {0, 1, 2, 3}; // maps step columns → IN1/IN2/IN3/IN4 (try different orderings to find working wiring)
 bool motionArmed = MOTION_ARMED_DEFAULT;
 bool pulseDebugEnabled = false;
@@ -913,7 +913,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.active = true;
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
-  motor4Job.sensorArmed = !isDetected(unoIr4IsLow ? LOW : HIGH);
+  motor4Job.sensorArmed = !isDetected(digitalRead(M4_IR_PIN));
   motor4Job.goingForward = false;
   motor4Job.startedMs = millis();
   motor4Job.coinDeadlineMs = motor4Job.startedMs + JOB_MAX_RUNTIME_MS;
@@ -1236,7 +1236,7 @@ void printStatus() {
     Serial.print(F("idle"));
   }
   Serial.print(F(" ir4="));
-  Serial.print(unoIr4IsLow ? 0 : 1);
+  Serial.print(digitalRead(M4_IR_PIN));
   Serial.print(F(" coinPin="));
   Serial.print(digitalRead(COIN_PIN));
   Serial.print(F(" billPin="));
@@ -1595,7 +1595,7 @@ void serviceLocalMotor4() {
     motor4Job.lastStepUs = nowUs;
   }
 
-  const bool detected = isDetected(unoIr4IsLow ? LOW : HIGH);
+  const bool detected = isDetected(digitalRead(M4_IR_PIN));
   if (!motor4Job.sensorArmed) {
     if (!detected) {
       motor4Job.sensorArmed = true;
@@ -2116,14 +2116,6 @@ void handleUnoLine(const String& line) {
     unoOnline = true;
     return;
   }
-  if (line == F("IR 20P BLOCK")) {
-    unoIr4IsLow = true;   // A3 blocked = coin present (ACTIVE_LOW)
-    return;
-  }
-  if (line == F("IR 20P CLEAR")) {
-    unoIr4IsLow = false;
-    return;
-  }
   if (line.startsWith(F("OK DISPENSE"))) {
     unoOnline = true;
     return;
@@ -2172,6 +2164,7 @@ void setup() {
   pinMode(M4_IN2_PIN, OUTPUT);
   pinMode(M4_IN3_PIN, OUTPUT);
   pinMode(M4_IN4_PIN, OUTPUT);
+  pinMode(M4_IR_PIN, INPUT_PULLUP);
   pinMode(BILL_PIN, INPUT_PULLUP);
   pinMode(COIN_PIN, INPUT_PULLUP);
   for (uint8_t index = 0; index < 5; ++index) {
