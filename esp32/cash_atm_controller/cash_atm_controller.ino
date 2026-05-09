@@ -39,8 +39,8 @@ constexpr uint8_t M4_IN1_PIN = 18;
 constexpr uint8_t M4_IN2_PIN = 19;
 constexpr uint8_t M4_IN3_PIN = 23;
 constexpr uint8_t M4_IN4_PIN = 27;  // moved from GPIO13 (unreliable); GPIO27 freed from IR4 (now on Uno A3)
-constexpr uint8_t M4_IR_PIN = 13;   // local IR for motor 4 (active-low)
-constexpr bool M4_IR_ACTIVE_LOW_DEFAULT = true;
+constexpr uint8_t M4_IR_PIN = 13;   // local IR for motor 4
+constexpr bool M4_IR_ACTIVE_LOW_DEFAULT = false;
 
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
