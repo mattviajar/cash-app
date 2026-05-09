@@ -146,7 +146,7 @@ struct MotorState {
   int sequenceIndex;
 };
 
-constexpr unsigned long M4_FORWARD_RUN_MS  = 8000;
+constexpr unsigned long M4_FORWARD_RUN_MS  = 10000;
 constexpr unsigned long M4_BACKWARD_RUN_MS = 10000;
 
 struct LocalDispenseJob {
