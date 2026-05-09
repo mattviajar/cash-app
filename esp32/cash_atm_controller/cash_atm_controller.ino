@@ -40,7 +40,6 @@ constexpr uint8_t M4_IN2_PIN = 19;
 constexpr uint8_t M4_IN3_PIN = 23;
 constexpr uint8_t M4_IN4_PIN = 27;  // moved from GPIO13 (unreliable); GPIO27 freed from IR4 (now on Uno A3)
 constexpr uint8_t M4_IR_PIN = 13;   // local IR for motor 4
-constexpr bool M4_IR_ACTIVE_LOW_DEFAULT = false;
 
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
@@ -263,7 +262,7 @@ unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
 uint8_t m4PinMap[4] = {0, 1, 2, 3}; // maps step columns → IN1/IN2/IN3/IN4 (try different orderings to find working wiring)
-bool m4IrActiveLow = M4_IR_ACTIVE_LOW_DEFAULT;
+int m4IrBaselineLevel = HIGH;
 bool motionArmed = MOTION_ARMED_DEFAULT;
 bool pulseDebugEnabled = false;
 InputDiag inputDiag = {false, 0, nullptr, true, 0, 0, 0, 0};
@@ -337,7 +336,7 @@ bool isDetected(int rawValue) {
 
 bool isM4IrDetected() {
   const int raw = digitalRead(M4_IR_PIN);
-  return m4IrActiveLow ? (raw == LOW) : (raw == HIGH);
+  return raw != m4IrBaselineLevel;
 }
 
 void writeMotor4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
@@ -933,6 +932,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.active = true;
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
+  m4IrBaselineLevel = digitalRead(M4_IR_PIN);
   motor4Job.sensorArmed = !isM4IrDetected();
   motor4Job.goingForward = false;
   motor4Job.startedMs = millis();
@@ -999,8 +999,7 @@ void printHelp() {
   Serial.println(F("  PULSEDEBUG"));
   Serial.println(F("  DIAGBILL"));
   Serial.println(F("  DIAGCOIN"));
-  Serial.println(F("  M4IR (print raw + detected + polarity)"));
-  Serial.println(F("  M4IRPOL LOW|HIGH"));
+  Serial.println(F("  M4IR (print raw + baseline + detected)"));
   Serial.println(F("  M4COIL a b c d   (raw 0/1 to IN1..IN4)"));
   Serial.println(F("  M4PINMAP p0 p1 p2 p3 (remap step cols 0-3 to IN1..IN4)"));
   Serial.println(F("  SERVO <channel> <angle>"));
@@ -1259,10 +1258,10 @@ void printStatus() {
   }
   Serial.print(F(" ir4="));
   Serial.print(digitalRead(M4_IR_PIN));
+  Serial.print(F(" ir4base="));
+  Serial.print(m4IrBaselineLevel);
   Serial.print(F(" ir4det="));
   Serial.print(isM4IrDetected() ? F("1") : F("0"));
-  Serial.print(F(" ir4pol="));
-  Serial.print(m4IrActiveLow ? F("LOW") : F("HIGH"));
   Serial.print(F(" coinPin="));
   Serial.print(digitalRead(COIN_PIN));
   Serial.print(F(" billPin="));
@@ -1911,25 +1910,11 @@ void handleUsbCommand(String command) {
     const int raw = digitalRead(M4_IR_PIN);
     Serial.print(F("M4IR raw="));
     Serial.print(raw);
+    Serial.print(F(" baseline="));
+    Serial.print(m4IrBaselineLevel);
     Serial.print(F(" detected="));
     Serial.print(isM4IrDetected() ? F("1") : F("0"));
-    Serial.print(F(" polarity="));
-    Serial.println(m4IrActiveLow ? F("LOW") : F("HIGH"));
-    return;
-  }
-
-  if (command.startsWith(F("M4IRPOL "))) {
-    const String mode = command.substring(8);
-    if (mode == F("LOW")) {
-      m4IrActiveLow = true;
-    } else if (mode == F("HIGH")) {
-      m4IrActiveLow = false;
-    } else {
-      Serial.println(F("ERR M4IRPOL use LOW or HIGH"));
-      return;
-    }
-    Serial.print(F("OK M4IRPOL="));
-    Serial.println(m4IrActiveLow ? F("LOW") : F("HIGH"));
+    Serial.println();
     return;
   }
 
