@@ -273,6 +273,8 @@ String unoLineBuffer;
 unsigned long lastStatusPrintMs = 0;
 unsigned long lastWifiAttemptMs = 0;
 unsigned long lastCommandPollMs = 0;
+unsigned long lastCommandPollErrorMs = 0;
+uint8_t commandPollFailures = 0;
 
 HardwareSerial UnoSerial(2);
 uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
@@ -489,7 +491,8 @@ void pollRemoteCommands() {
   }
 
   const unsigned long nowMs = millis();
-  if (nowMs - lastCommandPollMs < COMMAND_POLL_MS) {
+  const unsigned long pollDelayMs = commandPollFailures > 0 ? 60000UL : COMMAND_POLL_MS;
+  if (nowMs - lastCommandPollMs < pollDelayMs) {
     return;
   }
   lastCommandPollMs = nowMs;
@@ -516,12 +519,22 @@ void pollRemoteCommands() {
 
   const int status = http.GET();
   if (status != 200) {
-    if (status < 0) {
-      Serial.print(F("ERR: command HTTP error: "));
-      Serial.println(http.errorToString(status));
+    if (commandPollFailures == 0) {
+      Serial.print(F("WARN: command HTTP poll failed: "));
+      if (status < 0) {
+        Serial.println(http.errorToString(status));
+      } else {
+        Serial.println(status);
+      }
     }
+    commandPollFailures = static_cast<uint8_t>(min<int>(commandPollFailures + 1, 10));
+    lastCommandPollErrorMs = nowMs;
     http.end();
     return;
+  }
+
+  if (commandPollFailures > 0) {
+    commandPollFailures = 0;
   }
 
   const String payload = http.getString();
