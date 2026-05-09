@@ -39,7 +39,7 @@ constexpr uint8_t M4_IN1_PIN = 18;
 constexpr uint8_t M4_IN2_PIN = 19;
 constexpr uint8_t M4_IN3_PIN = 23;
 constexpr uint8_t M4_IN4_PIN = 27;  // moved from GPIO13 (unreliable); GPIO27 freed from IR4 (now on Uno A3)
-constexpr uint8_t M4_IR_PIN = 13;   // local IR for motor 4
+constexpr uint8_t M4_IR_PIN = 35;   // local IR for motor 4 (input-only, free GPIO)
 
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
@@ -2201,7 +2201,7 @@ void setup() {
   pinMode(M4_IN2_PIN, OUTPUT);
   pinMode(M4_IN3_PIN, OUTPUT);
   pinMode(M4_IN4_PIN, OUTPUT);
-  pinMode(M4_IR_PIN, INPUT_PULLUP);
+  pinMode(M4_IR_PIN, INPUT);
   pinMode(BILL_PIN, INPUT_PULLUP);
   pinMode(COIN_PIN, INPUT_PULLUP);
   for (uint8_t index = 0; index < 5; ++index) {
