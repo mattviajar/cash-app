@@ -124,18 +124,6 @@ function estimateWithdrawalSeconds(amount: number): number {
   return Math.min(30, Math.max(8, 5 + complexity * 2))
 }
 
-function estimateWithdrawalSecondsFromPlan(plan: Record<string, number> | null | undefined, amount: number): number {
-  const itemCount = plan
-    ? Object.values(plan).reduce((sum, count) => sum + (Number.isFinite(count) ? Number(count) : 0), 0)
-    : 0
-
-  if (itemCount > 0) {
-    return Math.min(35, Math.max(10, 6 + itemCount * 2))
-  }
-
-  return estimateWithdrawalSeconds(amount)
-}
-
 async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
   let lastError = 'Failed to save deposit'
 
@@ -185,6 +173,14 @@ async function fetchAccountBalance(username: string): Promise<number | null> {
     return null
   }
   return data.account.balance
+}
+
+async function fetchDeviceStatus(): Promise<{ withdrawActive?: boolean; withdrawState?: string; updatedAt?: string }> {
+  const res = await fetch('/api/device/status', { cache: 'no-store' })
+  if (!res.ok) {
+    return {}
+  }
+  return res.json() as Promise<{ withdrawActive?: boolean; withdrawState?: string; updatedAt?: string }>
 }
 
 async function acquireDeviceLock(username: string, mode: 'deposit' | 'withdraw'): Promise<{ ok: boolean; message?: string }> {
@@ -270,6 +266,7 @@ export default function DashboardPage() {
   const [depositCountdown, setDepositCountdown] = useState(30)
   const kidLastSeenDepositIdRef = useRef(0)
   const parentLastSeenDepositIdRef = useRef(0)
+  const withdrawStartedAtRef = useRef(0)
 
   const kidGoals = useMemo(() => {
     if (!kidName) return initialKidGoals
@@ -824,6 +821,7 @@ export default function DashboardPage() {
   ]
 
   const startWithdrawProgress = (actor: 'kid' | 'parent', amount: number) => {
+    withdrawStartedAtRef.current = Date.now()
     setWithdrawProgress({
       open: true,
       actor,
@@ -890,13 +888,6 @@ export default function DashboardPage() {
         alert(`❌ ${data.error ?? 'Withdrawal failed'}`)
         return
       }
-
-      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
-      setWithdrawProgress((prev) => ({
-        ...prev,
-        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
-        message: 'Dispensing cash now...',
-      }))
 
       setWithdrawPhase('dispensing', 'Dispensing cash now...')
 
@@ -982,13 +973,6 @@ export default function DashboardPage() {
         return
       }
 
-      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
-      setWithdrawProgress((prev) => ({
-        ...prev,
-        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
-        message: 'Dispensing parent cash withdrawal...',
-      }))
-
       setWithdrawPhase('dispensing', 'Dispensing parent cash withdrawal...')
 
       const latestParentBalance = await fetchAccountBalance(parentName)
@@ -1073,13 +1057,6 @@ export default function DashboardPage() {
         return
       }
 
-      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
-      setWithdrawProgress((prev) => ({
-        ...prev,
-        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
-        message: `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`,
-      }))
-
       setWithdrawPhase('dispensing', `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`)
 
       const [kidsRes, txRes] = await Promise.all([
@@ -1134,15 +1111,15 @@ export default function DashboardPage() {
       setWithdrawProgress((prev) => ({
         ...prev,
         phase: 'finalizing',
-        etaRemaining: 3,
-        message: 'Finalizing after the last bill/coin clears...',
+        message: 'Waiting for the machine to confirm the last bill/coin cleared...',
+        etaRemaining: 0,
       }))
       return
     }
 
     const timer = setTimeout(() => {
       setWithdrawProgress((prev) => {
-        if (!prev.open || (prev.phase !== 'dispensing' && prev.phase !== 'finalizing')) return prev
+        if (!prev.open || prev.phase !== 'dispensing') return prev
         return {
           ...prev,
           etaRemaining: Math.max(0, prev.etaRemaining - 1),
@@ -1154,29 +1131,53 @@ export default function DashboardPage() {
   }, [withdrawProgress])
 
   useEffect(() => {
-    if (!withdrawProgress.open || withdrawProgress.phase !== 'finalizing') return
+    if (!withdrawProgress.open || (withdrawProgress.phase !== 'dispensing' && withdrawProgress.phase !== 'finalizing')) return
 
-    if (withdrawProgress.etaRemaining <= 0) {
-      setWithdrawProgress((prev) => ({
-        ...prev,
-        phase: 'done',
-        message: 'Withdrawal finished. Please collect your cash.',
-      }))
-      return
+    let cancelled = false
+    let running = false
+
+    const pollStatus = async () => {
+      if (running) return
+      running = true
+      try {
+        const status = await fetchDeviceStatus()
+        if (cancelled) return
+
+        const completedAt = status.updatedAt ? Date.parse(status.updatedAt) : 0
+        if (status.withdrawState === 'complete' && Number.isFinite(completedAt) && completedAt >= withdrawStartedAtRef.current) {
+          setWithdrawProgress((prev) => ({
+            ...prev,
+            phase: 'done',
+            etaRemaining: 0,
+            message: 'Withdrawal finished. Please collect your cash.',
+          }))
+          return
+        }
+
+        if (withdrawProgress.phase === 'finalizing') {
+          setWithdrawProgress((prev) => {
+            if (!prev.open || prev.phase !== 'finalizing') return prev
+            return {
+              ...prev,
+              message: status.withdrawActive
+                ? 'Machine is still checking the final bills and coins...'
+                : 'Waiting for the machine to confirm completion...',
+            }
+          })
+        }
+      } finally {
+        running = false
+      }
     }
 
-    const timer = setTimeout(() => {
-      setWithdrawProgress((prev) => {
-        if (!prev.open || prev.phase !== 'finalizing') return prev
-        return {
-          ...prev,
-          etaRemaining: Math.max(0, prev.etaRemaining - 1),
-        }
-      })
-    }, 1000)
+    void pollStatus()
+    const interval = setInterval(() => { void pollStatus() }, 1000)
 
-    return () => clearTimeout(timer)
-  }, [withdrawProgress])
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [withdrawProgress.open, withdrawProgress.phase])
 
   useEffect(() => {
     if (!withdrawProgress.open || withdrawProgress.phase !== 'done') return

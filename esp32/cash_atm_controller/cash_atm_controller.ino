@@ -140,6 +140,7 @@ constexpr char WIFI_SSID[] = "VSupreme";
 constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
 constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
 constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
+constexpr char DEVICE_STATUS_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/device/status";
 constexpr unsigned long COMMAND_POLL_MS = 10000;
 constexpr unsigned long COMMAND_POLL_RETRY_MS = 15000;
 constexpr uint16_t COMMAND_HTTP_TIMEOUT_MS = 5000;
@@ -478,6 +479,39 @@ void postDeposit(float amount, const char* source, uint8_t pulses) {
     Serial.println(F("OK: deposit received by server"));
   }
   
+  http.end();
+}
+
+void postWithdrawStatus(const char* state, int amount, bool active) {
+  if (!ensureWifi()) {
+    Serial.println(F("ERR: WiFi not connected"));
+    return;
+  }
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+
+  if (!http.begin(secureClient, DEVICE_STATUS_API_URL)) {
+    Serial.println(F("ERR: status http.begin() failed"));
+    http.end();
+    return;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  const String body = String("{\"withdrawActive\":") + (active ? F("true") : F("false")) +
+                      String(",\"withdrawState\":\"") + String(state) +
+                      String("\",\"withdrawAmount\":") + String(amount) +
+                      String("}");
+
+  Serial.print(F("POST withdraw status state="));
+  Serial.println(state);
+  const int status = http.POST(body);
+  Serial.print(F("HTTP status status="));
+  Serial.println(status);
   http.end();
 }
 
@@ -1777,6 +1811,7 @@ void advanceWithdrawToNextSlot() {
     withdrawJob.active = false;
     withdrawJob.stage = WD_IDLE;
     Serial.println(F("WITHDRAW DONE"));
+    postWithdrawStatus("complete", 0, false);
     return;
   }
   withdrawJob.currentSlot = next;
@@ -1838,6 +1873,7 @@ bool startWithdrawJob(int amount) {
     Serial.print(coinRemainder);
   }
   Serial.println();
+  postWithdrawStatus("dispensing", amount, true);
 
   withdrawJob.billsLeft = withdrawJob.slotCounts[withdrawJob.currentSlot];
   setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
@@ -1904,6 +1940,7 @@ void serviceWithdrawJob() {
       withdrawJob.active = false;
       withdrawJob.stage = WD_IDLE;
       Serial.println(F("WITHDRAW DONE"));
+      postWithdrawStatus("complete", 0, false);
       break;
     }
     default: break;
