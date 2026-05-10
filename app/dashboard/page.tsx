@@ -214,6 +214,9 @@ export default function DashboardPage() {
   const [newKidSecurityQuestion, setNewKidSecurityQuestion] = useState("What's your favorite pet?")
   const [newKidSecurityAnswer, setNewKidSecurityAnswer] = useState('')
   const [newKidCustomQuestion, setNewKidCustomQuestion] = useState('')
+  const [parentWithdrawAmount, setParentWithdrawAmount] = useState('')
+  const [parentWithdrawNote, setParentWithdrawNote] = useState('')
+  const [parentWithdrawBusy, setParentWithdrawBusy] = useState(false)
   const [pendingDepositKid, setPendingDepositKid] = useState<string | null>(null)
   const [pendingDepositTarget, setPendingDepositTarget] = useState(0)
   const [pendingDepositReceived, setPendingDepositReceived] = useState(0)
@@ -675,6 +678,11 @@ export default function DashboardPage() {
     )
   }, [withdrawAmount, balance, kidDailyWithdrawLimit, kidRequireNote, withdrawNote])
 
+  const canParentWithdraw = useMemo(() => {
+    const amount = Number(parentWithdrawAmount)
+    return Number.isFinite(amount) && amount > 0 && amount <= parentBalance
+  }, [parentWithdrawAmount, parentBalance])
+
   const kidHistory = history.filter((entry) => entry.child === kidName)
   const pendingForKid = pendingWithdrawals.filter((entry) => entry.child === kidName)
   const kidHistorySigned = kidHistory.map((item) => ({
@@ -831,6 +839,79 @@ export default function DashboardPage() {
     }
 
     resetWithdrawForm()
+  }
+
+  const handleParentWithdraw = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!parentName || !canParentWithdraw || parentWithdrawBusy) return
+
+    const amount = Number(parentWithdrawAmount)
+    const note = parentWithdrawNote.trim() || 'Parent withdrawal'
+
+    setParentWithdrawBusy(true)
+    try {
+      const lock = await acquireDeviceLock(parentName, 'withdraw')
+      if (!lock.ok) {
+        alert(`❌ ${lock.message}`)
+        return
+      }
+
+      const res = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: `WITHDRAW ${Math.round(amount)}`,
+          account: parentName,
+          lockOwner: parentName,
+          role: 'parent',
+          autoCreate: true,
+          note,
+        }),
+      })
+
+      await releaseDeviceLock(parentName)
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Parent withdrawal failed' }))
+        alert(`❌ ${data.error ?? 'Parent withdrawal failed'}`)
+        return
+      }
+
+      const latestParentBalance = await fetchAccountBalance(parentName)
+      if (latestParentBalance !== null) {
+        setParentBalance(Math.round(latestParentBalance * 100) / 100)
+      }
+
+      const txRes = await fetch('/api/accounts/transactions', { cache: 'no-store' })
+      if (txRes.ok) {
+        const txData = await txRes.json() as {
+          transactions: Array<{
+            id: number
+            child: string
+            amount: number
+            signedAmount?: number
+            note: string
+            when: string
+            kind: string
+          }>
+        }
+        setHistory(
+          txData.transactions.map((entry) => ({
+            id: entry.id,
+            child: entry.child,
+            amount: Math.abs(entry.signedAmount ?? entry.amount),
+            note: entry.note,
+            when: entry.when,
+            kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+          }))
+        )
+      }
+
+      setParentWithdrawAmount('')
+      setParentWithdrawNote('')
+    } finally {
+      setParentWithdrawBusy(false)
+    }
   }
 
   const approvePending = async (id: number) => {
@@ -1540,6 +1621,41 @@ export default function DashboardPage() {
                   </button>
                 </div>
               ))}
+              {parentName && (
+                <div className="bg-white/70 rounded-xl p-4 md:col-span-2">
+                  <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Parent Wallet</p>
+                  <form onSubmit={handleParentWithdraw} className="grid gap-2 sm:grid-cols-3">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={parentWithdrawAmount}
+                      onChange={(e) => setParentWithdrawAmount(e.target.value)}
+                      placeholder="Amount"
+                      className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                    />
+                    <input
+                      type="text"
+                      value={parentWithdrawNote}
+                      onChange={(e) => setParentWithdrawNote(e.target.value)}
+                      placeholder="Reason (optional)"
+                      className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!canParentWithdraw || parentWithdrawBusy}
+                      className="px-4 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-red-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {parentWithdrawBusy ? 'Processing...' : '💸 Withdraw'}
+                    </button>
+                  </form>
+                  {!canParentWithdraw && parentWithdrawAmount !== '' && (
+                    <p className="text-sm text-red-600 font-inter mt-2">
+                      Enter a valid amount not greater than your parent wallet balance.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
