@@ -120,6 +120,7 @@ constexpr PulseMap COIN_MAP[] = {
   // Alternate pulse scale observed on your coin slot.
   {5, 5.0f},
   {10, 10.0f},
+  {11, 20.0f},  // 20-peso coin produces 11 pulses
   {15, 15.0f},
   {20, 20.0f},
 };
