@@ -25,7 +25,7 @@ type PendingWithdrawal = {
   createdAt: string
 }
 
-type WithdrawPhase = 'idle' | 'locking' | 'sending' | 'dispensing' | 'done' | 'error'
+type WithdrawPhase = 'idle' | 'locking' | 'sending' | 'dispensing' | 'finalizing' | 'done' | 'error'
 
 type WithdrawProgressState = {
   open: boolean
@@ -122,6 +122,18 @@ function estimateWithdrawalSeconds(amount: number): number {
   const normalized = Math.max(20, Math.round(amount / 20) * 20)
   const complexity = normalized >= 100 ? Math.ceil(normalized / 100) : Math.ceil(normalized / 20)
   return Math.min(30, Math.max(8, 5 + complexity * 2))
+}
+
+function estimateWithdrawalSecondsFromPlan(plan: Record<string, number> | null | undefined, amount: number): number {
+  const itemCount = plan
+    ? Object.values(plan).reduce((sum, count) => sum + (Number.isFinite(count) ? Number(count) : 0), 0)
+    : 0
+
+  if (itemCount > 0) {
+    return Math.min(35, Math.max(10, 6 + itemCount * 2))
+  }
+
+  return estimateWithdrawalSeconds(amount)
 }
 
 async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
@@ -879,6 +891,13 @@ export default function DashboardPage() {
         return
       }
 
+      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
+      setWithdrawProgress((prev) => ({
+        ...prev,
+        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
+        message: 'Dispensing cash now...',
+      }))
+
       setWithdrawPhase('dispensing', 'Dispensing cash now...')
 
       const updatedBalance = await fetchAccountBalance(kidName)
@@ -962,6 +981,13 @@ export default function DashboardPage() {
         alert(`❌ ${data.error ?? 'Parent withdrawal failed'}`)
         return
       }
+
+      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
+      setWithdrawProgress((prev) => ({
+        ...prev,
+        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
+        message: 'Dispensing parent cash withdrawal...',
+      }))
 
       setWithdrawPhase('dispensing', 'Dispensing parent cash withdrawal...')
 
@@ -1047,6 +1073,13 @@ export default function DashboardPage() {
         return
       }
 
+      const result = await res.json().catch(() => ({})) as { plan?: Record<string, number> }
+      setWithdrawProgress((prev) => ({
+        ...prev,
+        etaRemaining: estimateWithdrawalSecondsFromPlan(result.plan, amount),
+        message: `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`,
+      }))
+
       setWithdrawPhase('dispensing', `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`)
 
       const [kidsRes, txRes] = await Promise.all([
@@ -1100,6 +1133,32 @@ export default function DashboardPage() {
     if (withdrawProgress.etaRemaining <= 0) {
       setWithdrawProgress((prev) => ({
         ...prev,
+        phase: 'finalizing',
+        etaRemaining: 3,
+        message: 'Finalizing after the last bill/coin clears...',
+      }))
+      return
+    }
+
+    const timer = setTimeout(() => {
+      setWithdrawProgress((prev) => {
+        if (!prev.open || (prev.phase !== 'dispensing' && prev.phase !== 'finalizing')) return prev
+        return {
+          ...prev,
+          etaRemaining: Math.max(0, prev.etaRemaining - 1),
+        }
+      })
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [withdrawProgress])
+
+  useEffect(() => {
+    if (!withdrawProgress.open || withdrawProgress.phase !== 'finalizing') return
+
+    if (withdrawProgress.etaRemaining <= 0) {
+      setWithdrawProgress((prev) => ({
+        ...prev,
         phase: 'done',
         message: 'Withdrawal finished. Please collect your cash.',
       }))
@@ -1108,7 +1167,7 @@ export default function DashboardPage() {
 
     const timer = setTimeout(() => {
       setWithdrawProgress((prev) => {
-        if (!prev.open || prev.phase !== 'dispensing') return prev
+        if (!prev.open || prev.phase !== 'finalizing') return prev
         return {
           ...prev,
           etaRemaining: Math.max(0, prev.etaRemaining - 1),
