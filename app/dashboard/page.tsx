@@ -242,6 +242,10 @@ export default function DashboardPage() {
   const [parentWithdrawAmount, setParentWithdrawAmount] = useState('')
   const [parentWithdrawNote, setParentWithdrawNote] = useState('')
   const [parentWithdrawBusy, setParentWithdrawBusy] = useState(false)
+  const [parentChildWithdrawKid, setParentChildWithdrawKid] = useState('')
+  const [parentChildWithdrawAmount, setParentChildWithdrawAmount] = useState('')
+  const [parentChildWithdrawNote, setParentChildWithdrawNote] = useState('')
+  const [parentChildWithdrawBusy, setParentChildWithdrawBusy] = useState(false)
   const [pendingDepositKid, setPendingDepositKid] = useState<string | null>(null)
   const [pendingDepositTarget, setPendingDepositTarget] = useState(0)
   const [pendingDepositReceived, setPendingDepositReceived] = useState(0)
@@ -455,6 +459,21 @@ export default function DashboardPage() {
     const mapped = kidBalances[kidName] ?? 0
     setBalance((prev) => (prev === mapped ? prev : mapped))
   }, [isHydrated, role, kidName, kidBalances])
+
+  useEffect(() => {
+    if (role !== 'parent') return
+    if (validKidAccounts.length === 0) {
+      setParentChildWithdrawKid('')
+      return
+    }
+
+    setParentChildWithdrawKid((current) => {
+      if (current && validKidAccounts.includes(current)) {
+        return current
+      }
+      return validKidAccounts[0]
+    })
+  }, [role, validKidAccounts])
 
   useEffect(() => {
     if (role === 'kid' && activeMenu === 'settings') {
@@ -750,6 +769,14 @@ export default function DashboardPage() {
     balance: kidBalances[username] || 0,
     withdrawalsThisWeek: history.filter((entry) => entry.child === username).length,
   }))
+  const selectedChildBalance = useMemo(() => {
+    if (!parentChildWithdrawKid) return 0
+    return kidBalances[parentChildWithdrawKid] ?? parentChildren.find((child) => child.name === parentChildWithdrawKid)?.balance ?? 0
+  }, [kidBalances, parentChildWithdrawKid, parentChildren])
+  const canParentChildWithdraw = useMemo(() => {
+    const amount = Number(parentChildWithdrawAmount)
+    return Number.isFinite(amount) && amount > 0 && amount <= selectedChildBalance && !!parentChildWithdrawKid
+  }, [parentChildWithdrawAmount, parentChildWithdrawKid, selectedChildBalance])
   const parentSpendingByChild = parentChildren.map((child) => ({
     name: child.name,
     amount: history
@@ -972,6 +999,98 @@ export default function DashboardPage() {
       setParentWithdrawNote('')
     } finally {
       setParentWithdrawBusy(false)
+    }
+  }
+
+  const handleParentChildWithdraw = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!parentName || !parentChildWithdrawKid || parentChildWithdrawBusy) return
+
+    const amount = Number(parentChildWithdrawAmount)
+    const note = parentChildWithdrawNote.trim() || `Parent withdrew from ${parentChildWithdrawKid}`
+    const childBalance = kidBalances[parentChildWithdrawKid] ?? parentChildren.find((child) => child.name === parentChildWithdrawKid)?.balance ?? 0
+
+    if (!Number.isFinite(amount) || amount <= 0 || amount > childBalance) {
+      return
+    }
+
+    setParentChildWithdrawBusy(true)
+    try {
+      startWithdrawProgress('parent', amount)
+      const lock = await acquireDeviceLock(parentName, 'withdraw')
+      if (!lock.ok) {
+        setWithdrawError(lock.message ?? 'Unable to lock device right now.')
+        alert(`❌ ${lock.message}`)
+        return
+      }
+
+      setWithdrawPhase('sending', `Withdrawing from ${parentChildWithdrawKid}...`)
+      const res = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: `WITHDRAW ${Math.round(amount)}`,
+          account: parentChildWithdrawKid,
+          lockOwner: parentName,
+          role: 'kid',
+          autoCreate: true,
+          note,
+        }),
+      })
+
+      await releaseDeviceLock(parentName)
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Child withdrawal failed' }))
+        setWithdrawError(data.error ?? 'Child withdrawal failed')
+        alert(`❌ ${data.error ?? 'Child withdrawal failed'}`)
+        return
+      }
+
+      setWithdrawPhase('dispensing', `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`)
+
+      const [kidsRes, txRes] = await Promise.all([
+        fetch('/api/auth/kids', { cache: 'no-store' }),
+        fetch('/api/accounts/transactions', { cache: 'no-store' }),
+      ])
+
+      if (kidsRes.ok) {
+        const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+        const balances = kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+          acc[kid.username] = kid.balance
+          return acc
+        }, {})
+        setKidBalances(balances)
+      }
+
+      if (txRes.ok) {
+        const txData = await txRes.json() as {
+          transactions: Array<{
+            id: number
+            child: string
+            amount: number
+            signedAmount?: number
+            note: string
+            when: string
+            kind: string
+          }>
+        }
+        setHistory(
+          txData.transactions.map((entry) => ({
+            id: entry.id,
+            child: entry.child,
+            amount: Math.abs(entry.signedAmount ?? entry.amount),
+            note: entry.note,
+            when: entry.when,
+            kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+          }))
+        )
+      }
+
+      setParentChildWithdrawAmount('')
+      setParentChildWithdrawNote('')
+    } finally {
+      setParentChildWithdrawBusy(false)
     }
   }
 
@@ -1724,38 +1843,88 @@ export default function DashboardPage() {
                 </div>
               ))}
               {parentName && (
-                <div className="bg-white/70 rounded-xl p-4 md:col-span-2">
-                  <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Parent Wallet</p>
-                  <form onSubmit={handleParentWithdraw} className="grid gap-2 sm:grid-cols-3">
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={parentWithdrawAmount}
-                      onChange={(e) => setParentWithdrawAmount(e.target.value)}
-                      placeholder="Amount"
-                      className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                    />
-                    <input
-                      type="text"
-                      value={parentWithdrawNote}
-                      onChange={(e) => setParentWithdrawNote(e.target.value)}
-                      placeholder="Reason (optional)"
-                      className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!canParentWithdraw || parentWithdrawBusy}
-                      className="px-4 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-red-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {parentWithdrawBusy ? 'Processing...' : '💸 Withdraw'}
-                    </button>
-                  </form>
-                  {!canParentWithdraw && parentWithdrawAmount !== '' && (
-                    <p className="text-sm text-red-600 font-inter mt-2">
-                      Enter a valid amount not greater than your parent wallet balance.
+                <div className="bg-white/70 rounded-xl p-4 md:col-span-2 space-y-4">
+                  <div>
+                    <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Parent Wallet</p>
+                    <form onSubmit={handleParentWithdraw} className="grid gap-2 sm:grid-cols-3">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={parentWithdrawAmount}
+                        onChange={(e) => setParentWithdrawAmount(e.target.value)}
+                        placeholder="Amount"
+                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                      />
+                      <input
+                        type="text"
+                        value={parentWithdrawNote}
+                        onChange={(e) => setParentWithdrawNote(e.target.value)}
+                        placeholder="Reason (optional)"
+                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!canParentWithdraw || parentWithdrawBusy}
+                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-red-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {parentWithdrawBusy ? 'Processing...' : '💸 Withdraw'}
+                      </button>
+                    </form>
+                    {!canParentWithdraw && parentWithdrawAmount !== '' && (
+                      <p className="text-sm text-red-600 font-inter mt-2">
+                        Enter a valid amount not greater than your parent wallet balance.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="border-t border-white/60 pt-4">
+                    <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Child Balance</p>
+                    <form onSubmit={handleParentChildWithdraw} className="grid gap-2 sm:grid-cols-4">
+                      <select
+                        value={parentChildWithdrawKid}
+                        onChange={(e) => setParentChildWithdrawKid(e.target.value)}
+                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                      >
+                        {validKidAccounts.map((username) => (
+                          <option key={username} value={username}>
+                            {username}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={parentChildWithdrawAmount}
+                        onChange={(e) => setParentChildWithdrawAmount(e.target.value)}
+                        placeholder="Amount"
+                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                      />
+                      <input
+                        type="text"
+                        value={parentChildWithdrawNote}
+                        onChange={(e) => setParentChildWithdrawNote(e.target.value)}
+                        placeholder="Reason (optional)"
+                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!canParentChildWithdraw || parentChildWithdrawBusy}
+                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-sky-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {parentChildWithdrawBusy ? 'Processing...' : '🧒 Withdraw'}
+                      </button>
+                    </form>
+                    <p className="text-xs text-gray-600 font-inter mt-2">
+                      Available from {parentChildWithdrawKid || 'selected child'}: {formatPHP(selectedChildBalance)}
                     </p>
-                  )}
+                    {!canParentChildWithdraw && parentChildWithdrawAmount !== '' && (
+                      <p className="text-sm text-red-600 font-inter mt-2">
+                        Enter a valid amount not greater than the selected child's balance.
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
