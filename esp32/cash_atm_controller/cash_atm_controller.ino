@@ -34,6 +34,8 @@ constexpr bool STATUS_VERBOSE_LOG = false;
 constexpr unsigned long PULSE_MIN_EDGE_GAP_MS = 20;
 constexpr unsigned long PULSE_MIN_WIDTH_MS = 15;
 constexpr unsigned long PULSE_MAX_WIDTH_MS = 350;
+constexpr unsigned long COIN_IDLE_GAP_MS = 500;  // Increased from 250 for noise tolerance
+constexpr unsigned long BILL_IDLE_GAP_MS = 900;  // Slow pulse mode needs longer gap
 
 constexpr uint8_t M4_IN1_PIN = 18;
 constexpr uint8_t M4_IN2_PIN = 19;
@@ -245,10 +247,10 @@ uint8_t taskCount = 0;
 
 MotorState motor4 = {};
 LocalDispenseJob motor4Job = {};
-PulseInput coinInput = {COIN_PIN, "coin", true, false, 0, 0, 250, false, 0};
+PulseInput coinInput = {COIN_PIN, "coin", true, false, 0, 0, COIN_IDLE_GAP_MS, false, 0};
 // Slow pulse mode can stretch high-time to ~300ms between falling edges.
 // Use a larger idle gap so a single bill's pulse train is grouped correctly.
-PulseInput billInput = {BILL_PIN, "bill", true, false, 0, 0, 900, false, 0};
+PulseInput billInput = {BILL_PIN, "bill", true, false, 0, 0, BILL_IDLE_GAP_MS, false, 0};
 BillRouteJob billRoute = {};
 WithdrawJob withdrawJob = {};
 bool liftToIr51Active = false;
