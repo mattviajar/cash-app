@@ -25,6 +25,17 @@ type PendingWithdrawal = {
   createdAt: string
 }
 
+type WithdrawPhase = 'idle' | 'locking' | 'sending' | 'dispensing' | 'done' | 'error'
+
+type WithdrawProgressState = {
+  open: boolean
+  actor: 'kid' | 'parent'
+  amount: number
+  etaRemaining: number
+  phase: WithdrawPhase
+  message: string
+}
+
 type Goal = {
   id: number
   name: string
@@ -105,6 +116,12 @@ function getSignedTransactionAmount(item: WithdrawalRecord): number {
 function formatSignedPHP(value: number): string {
   const sign = value >= 0 ? '+' : '-'
   return `${sign}${formatPHP(Math.abs(value))}`
+}
+
+function estimateWithdrawalSeconds(amount: number): number {
+  const normalized = Math.max(20, Math.round(amount / 20) * 20)
+  const complexity = normalized >= 100 ? Math.ceil(normalized / 100) : Math.ceil(normalized / 20)
+  return Math.min(30, Math.max(8, 5 + complexity * 2))
 }
 
 async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
@@ -214,6 +231,14 @@ export default function DashboardPage() {
   const [newKidSecurityQuestion, setNewKidSecurityQuestion] = useState("What's your favorite pet?")
   const [newKidSecurityAnswer, setNewKidSecurityAnswer] = useState('')
   const [newKidCustomQuestion, setNewKidCustomQuestion] = useState('')
+  const [withdrawProgress, setWithdrawProgress] = useState<WithdrawProgressState>({
+    open: false,
+    actor: 'kid',
+    amount: 0,
+    etaRemaining: 0,
+    phase: 'idle',
+    message: '',
+  })
   const [parentWithdrawAmount, setParentWithdrawAmount] = useState('')
   const [parentWithdrawNote, setParentWithdrawNote] = useState('')
   const [parentWithdrawBusy, setParentWithdrawBusy] = useState(false)
@@ -759,6 +784,30 @@ export default function DashboardPage() {
       : 'No new goal alerts today.',
   ]
 
+  const startWithdrawProgress = (actor: 'kid' | 'parent', amount: number) => {
+    setWithdrawProgress({
+      open: true,
+      actor,
+      amount,
+      etaRemaining: estimateWithdrawalSeconds(amount),
+      phase: 'locking',
+      message: 'Securing the ATM device lock...',
+    })
+  }
+
+  const setWithdrawPhase = (phase: WithdrawPhase, message: string) => {
+    setWithdrawProgress((prev) => ({ ...prev, open: true, phase, message }))
+  }
+
+  const setWithdrawError = (message: string) => {
+    setWithdrawProgress((prev) => ({
+      ...prev,
+      open: true,
+      phase: 'error',
+      message,
+    }))
+  }
+
   const resetWithdrawForm = () => {
     setWithdrawAmount('')
     setWithdrawNote('')
@@ -772,12 +821,15 @@ export default function DashboardPage() {
     const note = withdrawNote.trim() || 'Withdrawal'
 
     if (instantWithdrawals || (parentAutoApproveLimit > 0 && amount <= parentAutoApproveLimit)) {
+      startWithdrawProgress('kid', amount)
       const lock = await acquireDeviceLock(kidName, 'withdraw')
       if (!lock.ok) {
+        setWithdrawError(lock.message ?? 'Unable to lock device right now.')
         alert(`❌ ${lock.message}`)
         return
       }
 
+      setWithdrawPhase('sending', 'Sending withdrawal command to the machine...')
       const res = await fetch('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -795,9 +847,12 @@ export default function DashboardPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Withdrawal failed' }))
+        setWithdrawError(data.error ?? 'Withdrawal failed')
         alert(`❌ ${data.error ?? 'Withdrawal failed'}`)
         return
       }
+
+      setWithdrawPhase('dispensing', 'Dispensing cash now...')
 
       const updatedBalance = await fetchAccountBalance(kidName)
       if (updatedBalance !== null) {
@@ -850,12 +905,15 @@ export default function DashboardPage() {
 
     setParentWithdrawBusy(true)
     try {
+      startWithdrawProgress('parent', amount)
       const lock = await acquireDeviceLock(parentName, 'withdraw')
       if (!lock.ok) {
+        setWithdrawError(lock.message ?? 'Unable to lock device right now.')
         alert(`❌ ${lock.message}`)
         return
       }
 
+      setWithdrawPhase('sending', 'Sending parent withdrawal command...')
       const res = await fetch('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -873,9 +931,12 @@ export default function DashboardPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Parent withdrawal failed' }))
+        setWithdrawError(data.error ?? 'Parent withdrawal failed')
         alert(`❌ ${data.error ?? 'Parent withdrawal failed'}`)
         return
       }
+
+      setWithdrawPhase('dispensing', 'Dispensing parent cash withdrawal...')
 
       const latestParentBalance = await fetchAccountBalance(parentName)
       if (latestParentBalance !== null) {
@@ -914,17 +975,55 @@ export default function DashboardPage() {
     }
   }
 
+  useEffect(() => {
+    if (!withdrawProgress.open || withdrawProgress.phase !== 'dispensing') return
+
+    if (withdrawProgress.etaRemaining <= 0) {
+      setWithdrawProgress((prev) => ({
+        ...prev,
+        phase: 'done',
+        message: 'Withdrawal finished. Please collect your cash.',
+      }))
+      return
+    }
+
+    const timer = setTimeout(() => {
+      setWithdrawProgress((prev) => {
+        if (!prev.open || prev.phase !== 'dispensing') return prev
+        return {
+          ...prev,
+          etaRemaining: Math.max(0, prev.etaRemaining - 1),
+        }
+      })
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [withdrawProgress])
+
+  useEffect(() => {
+    if (!withdrawProgress.open || withdrawProgress.phase !== 'done') return
+
+    const timer = setTimeout(() => {
+      setWithdrawProgress((prev) => ({ ...prev, open: false, phase: 'idle' }))
+    }, 2500)
+
+    return () => clearTimeout(timer)
+  }, [withdrawProgress.open, withdrawProgress.phase])
+
   const approvePending = async (id: number) => {
     const request = pendingWithdrawals.find((item) => item.id === id)
     if (!request) return
 
     const locker = parentName || request.child
+    startWithdrawProgress('parent', request.amount)
     const lock = await acquireDeviceLock(locker, 'withdraw')
     if (!lock.ok) {
+      setWithdrawError(lock.message ?? 'Unable to lock device right now.')
       alert(`❌ ${lock.message}`)
       return
     }
 
+    setWithdrawPhase('sending', `Sending withdrawal for ${request.child}...`)
     const commandRes = await fetch('/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -942,9 +1041,12 @@ export default function DashboardPage() {
 
     if (!commandRes.ok) {
       const data = await commandRes.json().catch(() => ({ error: 'Failed to process withdrawal request' }))
+      setWithdrawError(data.error ?? 'Failed to process withdrawal request')
       alert(`❌ ${data.error ?? 'Failed to process withdrawal request'}`)
       return
     }
+
+    setWithdrawPhase('dispensing', `Dispensing ${formatPHP(request.amount)} for ${request.child}...`)
 
     await fetch(`/api/pending-withdrawals?id=${id}`, { method: 'DELETE' })
 
@@ -2310,6 +2412,53 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
+
+      {withdrawProgress.open && (
+        <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 space-y-4 text-center">
+            <div className="text-7xl">
+              {withdrawProgress.phase === 'locking' && '🦊'}
+              {withdrawProgress.phase === 'sending' && '🐼'}
+              {withdrawProgress.phase === 'dispensing' && '🐰'}
+              {withdrawProgress.phase === 'done' && '🎉'}
+              {withdrawProgress.phase === 'error' && '😿'}
+            </div>
+
+            <h3 className="text-2xl font-sora font-bold text-blue-700">
+              {withdrawProgress.phase === 'done' ? 'Withdrawal Complete' : 'Processing Withdrawal'}
+            </h3>
+
+            <p className="font-inter text-gray-700">{withdrawProgress.message}</p>
+
+            {withdrawProgress.phase === 'dispensing' && (
+              <div className="rounded-xl bg-blue-50 px-4 py-3 font-inter text-blue-800">
+                <p className="text-sm">Estimated time remaining</p>
+                <p className="text-4xl font-sora font-black">{withdrawProgress.etaRemaining}s</p>
+              </div>
+            )}
+
+            {(withdrawProgress.phase === 'locking' || withdrawProgress.phase === 'sending') && (
+              <div className="rounded-xl bg-amber-50 px-4 py-3 font-inter text-amber-800">
+                <p className="text-sm">Preparing request...</p>
+              </div>
+            )}
+
+            {withdrawProgress.phase === 'done' && (
+              <p className="text-green-700 font-inter font-semibold">Please collect your cash now.</p>
+            )}
+
+            {withdrawProgress.phase === 'error' && (
+              <button
+                type="button"
+                onClick={() => setWithdrawProgress((prev) => ({ ...prev, open: false, phase: 'idle' }))}
+                className="w-full rounded-xl bg-gray-200 text-gray-800 px-4 py-2 font-inter font-semibold"
+              >
+                Close
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {role === 'parent' && pendingDepositKid && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
