@@ -98,10 +98,14 @@ export async function POST(request: Request) {
           update: {},
         })
 
+        console.log(`[WITHDRAW] amount=${withdrawAmount} inventory=`, inventory)
+        
         const plan = planWithdrawalBreakdown(inventory, withdrawAmount)
         if (!plan) {
           throw new Error('INSUFFICIENT_INVENTORY')
         }
+        
+        console.log(`[WITHDRAW] plan generated=`, plan)
 
         const decrementData = buildInventoryDecrementData(plan)
         await tx.machineInventory.update({

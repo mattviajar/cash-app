@@ -58,6 +58,8 @@ export async function POST(request: Request) {
   const note = typeof payload.note === 'string' ? payload.note.trim() : 'Hardware deposit'
   const autoCreate = payload.autoCreate !== false
 
+  console.log(`[DEPOSIT] amount=${amount} source="${source}" account="${username}"`)
+
   try {
     const normalizedAmount = Math.round(amount * 100) / 100
 
@@ -68,6 +70,8 @@ export async function POST(request: Request) {
 
       const inventoryField = await applyDepositToInventory(tx, normalizeCashAmount(normalizedAmount), source)
       const breakdown = buildBreakdownFromField(inventoryField)
+      
+      console.log(`[DEPOSIT] mapped field="${inventoryField}" breakdown=`, breakdown)
 
       let accountBalance: number | null = null
       if (username) {
