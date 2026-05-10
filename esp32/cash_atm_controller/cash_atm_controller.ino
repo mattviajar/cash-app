@@ -1792,6 +1792,71 @@ void handlePayoutCommand(int amount) {
   }
 }
 
+// Helper: parse "key=value" from command string
+int sscanfValue(const String& cmd, const char* key) {
+  int idx = cmd.indexOf(key);
+  if (idx < 0) return 0;
+  int valueStart = idx + strlen(key);
+  int valueEnd = valueStart;
+  while (valueEnd < cmd.length() && cmd.charAt(valueEnd) >= '0' && cmd.charAt(valueEnd) <= '9') {
+    ++valueEnd;
+  }
+  if (valueEnd <= valueStart) return 0;
+  return cmd.substring(valueStart, valueEnd).toInt();
+}
+
+// Withdrawal without recalculation - uses provided counts directly
+bool startWithdrawJobWithCounts(uint8_t counts[5]) {
+  if (withdrawJob.active) { Serial.println(F("ERR withdraw-busy")); return false; }
+  if (!motionArmed)        { Serial.println(F("ERR withdraw-disarmed")); return false; }
+  if (!SERVOS_ENABLED)     { Serial.println(F("ERR withdraw-servos-disabled")); return false; }
+  if (billRoute.active)    { Serial.println(F("ERR withdraw-routing-busy")); return false; }
+
+  if (elevatorParkActive) stopElevatorPark();
+  setLiftCommand(SERVO_STOP_CMD);
+  stopElevatorOutMotor();
+
+  withdrawJob = {};
+  for (uint8_t i = 0; i < 5; ++i) withdrawJob.slotCounts[i] = counts[i];
+  withdrawJob.active = true;
+  withdrawJob.startedMs = millis();
+  withdrawJob.stageStartedMs = withdrawJob.startedMs;
+
+  // Find first slot with bills
+  withdrawJob.currentSlot = 0;
+  while (withdrawJob.currentSlot < 5 && withdrawJob.slotCounts[withdrawJob.currentSlot] == 0) {
+    ++withdrawJob.currentSlot;
+  }
+
+  int totalAmount = counts[0] * 20 + counts[1] * 50 + counts[2] * 100 + counts[3] * 500 + counts[4] * 1000;
+  
+  Serial.print(F("WITHDRAW START bills amount="));
+  Serial.print(totalAmount);
+  Serial.print(F(" 20x")); Serial.print(counts[0]);
+  Serial.print(F(" 50x")); Serial.print(counts[1]);
+  Serial.print(F(" 100x")); Serial.print(counts[2]);
+  Serial.print(F(" 500x")); Serial.print(counts[3]);
+  Serial.print(F(" 1000x")); Serial.println(counts[4]);
+  postWithdrawStatus("dispensing", totalAmount, true);
+
+  if (withdrawJob.currentSlot >= 5) {
+    // No bills to dispense
+    withdrawJob.active = false;
+    Serial.println(F("WITHDRAW no bills to dispense"));
+    postWithdrawStatus("complete", 0, false);
+    return true;
+  }
+
+  withdrawJob.billsLeft = withdrawJob.slotCounts[withdrawJob.currentSlot];
+  setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+  withdrawJob.stage = WD_SPIN_BILL;
+  withdrawJob.stageStartedMs = withdrawJob.startedMs;
+  Serial.print(F("WITHDRAW SPIN slot="));
+  Serial.print(withdrawJob.currentSlot + 1);
+  Serial.print(F(" bills_left=")); Serial.println(withdrawJob.billsLeft);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Withdrawal state machine – dispenses bills from storage via spinner reverse.
 // ---------------------------------------------------------------------------
@@ -2088,6 +2153,10 @@ void handleUsbCommand(String command) {
 
   if (commandUpper.startsWith(F("WITHDRAW"))) {
     int amount = 0;
+    int coin1 = 0, coin5 = 0, coin10 = 0, coin20 = 0;
+    int bill20 = 0, bill50 = 0, bill100 = 0, bill500 = 0, bill1000 = 0;
+    
+    // Parse amount
     int firstDigit = -1;
     for (int i = 0; i < command.length(); ++i) {
       const char ch = command.charAt(i);
@@ -2099,12 +2168,49 @@ void handleUsbCommand(String command) {
     if (firstDigit >= 0) {
       amount = command.substring(firstDigit).toInt();
     }
+    
+    // Parse coin/bill breakdown: "WITHDRAW 20 coin20=1 bill50=1 ..."
+    if (command.indexOf(F("coin1=")) >= 0) coin1 = sscanfValue(command, "coin1=");
+    if (command.indexOf(F("coin5=")) >= 0) coin5 = sscanfValue(command, "coin5=");
+    if (command.indexOf(F("coin10=")) >= 0) coin10 = sscanfValue(command, "coin10=");
+    if (command.indexOf(F("coin20=")) >= 0) coin20 = sscanfValue(command, "coin20=");
+    if (command.indexOf(F("bill20=")) >= 0) bill20 = sscanfValue(command, "bill20=");
+    if (command.indexOf(F("bill50=")) >= 0) bill50 = sscanfValue(command, "bill50=");
+    if (command.indexOf(F("bill100=")) >= 0) bill100 = sscanfValue(command, "bill100=");
+    if (command.indexOf(F("bill500=")) >= 0) bill500 = sscanfValue(command, "bill500=");
+    if (command.indexOf(F("bill1000=")) >= 0) bill1000 = sscanfValue(command, "bill1000=");
+    
     if (amount <= 0) {
-      // Compatibility default for apps that send only "WITHDRAW".
       amount = 20;
       Serial.println(F("WARN WITHDRAW amount missing; defaulting to 20"));
     }
-    startWithdrawJob(amount);
+    
+    // Handle coins first via motor 4 (stepper)
+    int coinTotal = coin1 * 1 + coin5 * 5 + coin10 * 10 + coin20 * 20;
+    if (coinTotal > 0) {
+      Serial.print(F("WITHDRAW coins coin1="));
+      Serial.print(coin1); Serial.print(F(" coin5="));
+      Serial.print(coin5); Serial.print(F(" coin10="));
+      Serial.print(coin10); Serial.print(F(" coin20="));
+      Serial.print(coin20); Serial.print(F(" total="));
+      Serial.println(coinTotal);
+      handlePayoutCommand(coinTotal);
+    }
+    
+    // Handle bills via storage spinners
+    if (bill20 > 0 || bill50 > 0 || bill100 > 0 || bill500 > 0 || bill1000 > 0) {
+      uint8_t counts[5] = {
+        static_cast<uint8_t>(bill20),
+        static_cast<uint8_t>(bill50),
+        static_cast<uint8_t>(bill100),
+        static_cast<uint8_t>(bill500),
+        static_cast<uint8_t>(bill1000)
+      };
+      startWithdrawJobWithCounts(counts);
+    } else if (coinTotal == 0) {
+      // No coins and no bills - error
+      Serial.println(F("ERR WITHDRAW empty breakdown"));
+    }
     return;
   }
 

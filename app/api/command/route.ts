@@ -151,7 +151,20 @@ export async function POST(request: Request) {
           },
         })
 
-        await tx.commandQueue.create({ data: { command: `WITHDRAW ${withdrawAmount}` } })
+        // Send breakdown to firmware so it knows which motors to use
+        // Format: WITHDRAW <amount> [coin20=N coin10=N ...]
+        let cmdStr = `WITHDRAW ${withdrawAmount}`
+        if (plan.coin20 > 0) cmdStr += ` coin20=${plan.coin20}`
+        if (plan.coin10 > 0) cmdStr += ` coin10=${plan.coin10}`
+        if (plan.coin5 > 0) cmdStr += ` coin5=${plan.coin5}`
+        if (plan.coin1 > 0) cmdStr += ` coin1=${plan.coin1}`
+        if (plan.bill20 > 0) cmdStr += ` bill20=${plan.bill20}`
+        if (plan.bill50 > 0) cmdStr += ` bill50=${plan.bill50}`
+        if (plan.bill100 > 0) cmdStr += ` bill100=${plan.bill100}`
+        if (plan.bill500 > 0) cmdStr += ` bill500=${plan.bill500}`
+        if (plan.bill1000 > 0) cmdStr += ` bill1000=${plan.bill1000}`
+
+        await tx.commandQueue.create({ data: { command: cmdStr } })
         return { ok: true, amount: withdrawAmount, plan, accountBalance }
       })
 
