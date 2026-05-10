@@ -85,6 +85,7 @@ const STORAGE_KEYS = {
 }
 
 const defaultHistory: WithdrawalRecord[] = []
+const DEPOSIT_COUNTDOWN_SECONDS = 60
 
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
@@ -263,7 +264,7 @@ export default function DashboardPage() {
   const [lastHardwareDepositAt, setLastHardwareDepositAt] = useState<string | null>(null)
   const [lastHardwareDepositAmount, setLastHardwareDepositAmount] = useState<number | null>(null)
   const [kidDepositModalOpen, setKidDepositModalOpen] = useState(false)
-  const [depositCountdown, setDepositCountdown] = useState(30)
+  const [depositCountdown, setDepositCountdown] = useState(DEPOSIT_COUNTDOWN_SECONDS)
   const kidLastSeenDepositIdRef = useRef(0)
   const parentLastSeenDepositIdRef = useRef(0)
   const withdrawStartedAtRef = useRef(0)
@@ -540,7 +541,7 @@ export default function DashboardPage() {
           setPendingDepositReceived((prev) => Math.round((prev + total) * 100) / 100)
           setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
           setLastHardwareDepositAmount(total)
-          setDepositCountdown(30)
+          setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
         }
       } catch {
         // Silently ignore network errors
@@ -587,7 +588,7 @@ export default function DashboardPage() {
           setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
           setLastHardwareDepositAmount(total)
           setPendingDepositError(null)
-          setDepositCountdown(30)
+          setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
         }
       } catch {
         if (!cancelled) {
@@ -1295,7 +1296,7 @@ export default function DashboardPage() {
     setPendingDepositTarget(0)
     setPendingDepositReceived(0)
     setPendingDepositError(null)
-    setDepositCountdown(30)
+    setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
   }
 
   const cancelParentDepositFlow = () => {
@@ -1308,7 +1309,7 @@ export default function DashboardPage() {
     setPendingDepositTarget(0)
     setPendingDepositReceived(0)
     setPendingDepositError(null)
-    setDepositCountdown(30)
+    setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
   }
 
   const applyParentReceivedDeposit = async () => {
@@ -1426,7 +1427,7 @@ export default function DashboardPage() {
                 await fetch('/api/deposit/clear', { method: 'POST' })
                 setPendingDepositReceived(0)
                 setPendingDepositError(null)
-                setDepositCountdown(30)
+                setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
                 setKidDepositModalOpen(true)
               })()
             }}
