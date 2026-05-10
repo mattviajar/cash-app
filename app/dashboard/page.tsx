@@ -84,15 +84,6 @@ function safeParse<T>(raw: string | null, fallback: T): T {
   }
 }
 
-function loadApprovedPendingIds(): number[] {
-  return safeParse<number[]>(localStorage.getItem(STORAGE_KEYS.approvedPendingIds), [])
-}
-
-function filterApprovedPending(items: PendingWithdrawal[]): PendingWithdrawal[] {
-  const approved = new Set(loadApprovedPendingIds())
-  return items.filter((item) => !approved.has(item.id))
-}
-
 const PHP_CURRENCY = new Intl.NumberFormat('en-PH', {
   style: 'currency',
   currency: 'PHP',
@@ -116,6 +107,61 @@ function formatSignedPHP(value: number): string {
   return `${sign}${formatPHP(Math.abs(value))}`
 }
 
+async function persistAccountDeposit(username: string, amount: number, role: Role, note: string) {
+  await fetch('/api/accounts/deposit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username,
+      amount,
+      role,
+      note,
+      source: 'dashboard',
+      autoCreate: true,
+    }),
+  })
+}
+
+async function fetchAccountBalance(username: string): Promise<number | null> {
+  const res = await fetch(`/api/accounts/balance?username=${encodeURIComponent(username)}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    return null
+  }
+  const data = await res.json() as { account?: { balance?: number } }
+  if (typeof data.account?.balance !== 'number') {
+    return null
+  }
+  return data.account.balance
+}
+
+async function acquireDeviceLock(username: string, mode: 'deposit' | 'withdraw'): Promise<{ ok: boolean; message?: string }> {
+  const res = await fetch('/api/device/lock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'acquire', username, mode, ttlSeconds: 120 }),
+  })
+
+  if (res.ok) {
+    return { ok: true }
+  }
+
+  const data = await res.json().catch(() => ({})) as { holder?: string; error?: string }
+  if (res.status === 409 && data.holder) {
+    return { ok: false, message: `Device is currently in use by ${data.holder}.` }
+  }
+  return { ok: false, message: data.error ?? 'Unable to lock device right now.' }
+}
+
+async function releaseDeviceLock(username: string) {
+  await fetch('/api/device/lock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'release', username }),
+  })
+}
+
 export default function DashboardPage() {
   const router = useRouter()
   const [role, setRole] = useState<Role>('kid')
@@ -137,6 +183,8 @@ export default function DashboardPage() {
   const [newGoalTarget, setNewGoalTarget] = useState('')
   const [kidCharacter, setKidCharacter] = useState('astronaut')
   const [kidName, setKidName] = useState('')
+  const [parentName, setParentName] = useState('')
+  const [parentBalance, setParentBalance] = useState(0)
   const [validKidAccounts, setValidKidAccounts] = useState<string[]>([])
   const [kidBalances, setKidBalances] = useState<{ [key: string]: number }>({})
   const [newKidUsername, setNewKidUsername] = useState('')
@@ -167,29 +215,17 @@ export default function DashboardPage() {
     const role = storedRole === 'parent' ? 'parent' : 'kid'
     setRole(role)
 
-    const loadedKidBalances = safeParse<Record<string, number>>(
-      localStorage.getItem(STORAGE_KEYS.kidBalances),
-      {}
-    )
-    setKidBalances(loadedKidBalances)
-
-    const loadedKidAccounts = safeParse<string[]>(
-      localStorage.getItem(STORAGE_KEYS.validKidAccounts),
-      []
-    )
-    setValidKidAccounts(loadedKidAccounts)
-
     const loadedGoalsByAccount = safeParse<Record<string, Goal[]>>(
       localStorage.getItem(STORAGE_KEYS.kidGoalsByAccount),
       {}
     )
 
+    const username = sessionStorage.getItem('cash_username')
+
     // If kid, set their name from username
     if (role === 'kid') {
-      const username = sessionStorage.getItem('cash_username')
       if (username) {
         setKidName(username)
-        setBalance(loadedKidBalances[username] ?? 0)
 
         if (!loadedGoalsByAccount[username]) {
           const legacyGoals = safeParse<Goal[]>(
@@ -201,17 +237,15 @@ export default function DashboardPage() {
           }
         }
       }
+    } else {
+      if (username) {
+        setParentName(username)
+      }
     }
 
     setKidGoalsByAccount(loadedGoalsByAccount)
 
     setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
-    setPendingWithdrawals(
-      filterApprovedPending(
-        safeParse<PendingWithdrawal[]>(localStorage.getItem(STORAGE_KEYS.pending), [])
-      )
-    )
-    setHistory(safeParse<WithdrawalRecord[]>(localStorage.getItem(STORAGE_KEYS.history), defaultHistory))
 
     const storedNotifications = localStorage.getItem(STORAGE_KEYS.kidNotifications)
     if (storedNotifications) {
@@ -254,6 +288,61 @@ export default function DashboardPage() {
       setKidCharacter(storedCharacter)
     }
 
+    void (async () => {
+      try {
+        const [kidsRes, pendingRes, txRes] = await Promise.all([
+          fetch('/api/auth/kids', { cache: 'no-store' }),
+          fetch('/api/pending-withdrawals', { cache: 'no-store' }),
+          fetch('/api/accounts/transactions', { cache: 'no-store' }),
+        ])
+
+        if (kidsRes.ok) {
+          const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+          const names = kidsData.kids.map((kid) => kid.username)
+          const balances = kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+            acc[kid.username] = kid.balance
+            return acc
+          }, {})
+          setValidKidAccounts(names)
+          setKidBalances(balances)
+          if (role === 'kid' && username) {
+            setBalance(balances[username] ?? 0)
+          }
+        }
+
+        if (pendingRes.ok) {
+          const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+          setPendingWithdrawals(pendingData.pending)
+        }
+
+        if (txRes.ok) {
+          const txData = await txRes.json() as {
+            transactions: Array<{
+              id: number
+              child: string
+              amount: number
+              signedAmount?: number
+              note: string
+              when: string
+              kind: string
+            }>
+          }
+          setHistory(
+            txData.transactions.map((entry) => ({
+              id: entry.id,
+              child: entry.child,
+              amount: Math.abs(entry.signedAmount ?? entry.amount),
+              note: entry.note,
+              when: entry.when,
+              kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+            }))
+          )
+        }
+      } catch {
+        // Keep UI usable even when API is temporarily unavailable.
+      }
+    })()
+
     setIsHydrated(true)
 
   }, [])
@@ -261,7 +350,6 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!isHydrated) return
     localStorage.setItem(STORAGE_KEYS.instant, String(instantWithdrawals))
-    localStorage.setItem(STORAGE_KEYS.history, JSON.stringify(history))
     localStorage.setItem(STORAGE_KEYS.kidNotifications, String(kidNotifications))
     localStorage.setItem(STORAGE_KEYS.kidShowBalance, String(kidShowBalance))
     localStorage.setItem(STORAGE_KEYS.kidRequireNote, String(kidRequireNote))
@@ -270,12 +358,9 @@ export default function DashboardPage() {
     localStorage.setItem(STORAGE_KEYS.parentAutoApproveLimit, String(parentAutoApproveLimit))
     localStorage.setItem(STORAGE_KEYS.kidGoalsByAccount, JSON.stringify(kidGoalsByAccount))
     localStorage.setItem(STORAGE_KEYS.kidCharacter, kidCharacter)
-    localStorage.setItem(STORAGE_KEYS.validKidAccounts, JSON.stringify(validKidAccounts))
-    localStorage.setItem(STORAGE_KEYS.kidBalances, JSON.stringify(kidBalances))
   }, [
     isHydrated,
     instantWithdrawals,
-    history,
     kidNotifications,
     kidShowBalance,
     kidRequireNote,
@@ -284,29 +369,7 @@ export default function DashboardPage() {
     parentAutoApproveLimit,
     kidGoalsByAccount,
     kidCharacter,
-    validKidAccounts,
-    kidBalances,
   ])
-
-  // Keep local state in sync across tabs/windows to avoid stale overwrites.
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === STORAGE_KEYS.pending) {
-        setPendingWithdrawals(filterApprovedPending(safeParse<PendingWithdrawal[]>(event.newValue, [])))
-        return
-      }
-      if (event.key === STORAGE_KEYS.history) {
-        setHistory(safeParse<WithdrawalRecord[]>(event.newValue, defaultHistory))
-        return
-      }
-      if (event.key === STORAGE_KEYS.kidBalances) {
-        setKidBalances(safeParse<Record<string, number>>(event.newValue, {}))
-      }
-    }
-
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [])
 
   useEffect(() => {
     if (!isHydrated) return
@@ -317,6 +380,23 @@ export default function DashboardPage() {
       return { ...prev, [kidName]: balance }
     })
   }, [isHydrated, role, kidName, balance])
+
+  useEffect(() => {
+    if (!isHydrated || role !== 'parent' || !parentName) return
+
+    let cancelled = false
+    const syncParentBalance = async () => {
+      const dbBalance = await fetchAccountBalance(parentName)
+      if (!cancelled && dbBalance !== null) {
+        setParentBalance(Math.round(dbBalance * 100) / 100)
+      }
+    }
+
+    void syncParentBalance()
+    return () => {
+      cancelled = true
+    }
+  }, [isHydrated, role, parentName])
 
   // Keep kid UI balance aligned with the authoritative per-account balance map.
   useEffect(() => {
@@ -464,6 +544,7 @@ export default function DashboardPage() {
       if (pendingDepositReceived > 0) {
         const credited = Math.round(pendingDepositReceived * 100) / 100
         setBalance((prev) => Math.round((prev + credited) * 100) / 100)
+        void persistAccountDeposit(kidName, credited, 'kid', 'Hardware deposit')
         setHistory((prev) => [
           {
             id: Date.now(),
@@ -480,13 +561,22 @@ export default function DashboardPage() {
       }
       setPendingDepositReceived(0)
       setKidDepositModalOpen(false)
+      if (kidName) {
+        void releaseDeviceLock(kidName)
+      }
     } else if (pendingDepositKid) {
       if (pendingDepositReceived > 0) {
         const credited = Math.round(pendingDepositReceived * 100) / 100
-        setKidBalances((prev) => ({
-          ...prev,
-          [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
-        }))
+        if (pendingDepositKid === parentName) {
+          setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
+          void persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (self)')
+        } else {
+          setKidBalances((prev) => ({
+            ...prev,
+            [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
+          }))
+          void persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (parent confirmation)')
+        }
         setHistory((prev) => [
           {
             id: Date.now(),
@@ -500,6 +590,10 @@ export default function DashboardPage() {
         ])
         setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
         setTimeout(() => setDepositToast(null), 4000)
+      }
+      const locker = parentName || pendingDepositKid
+      if (locker) {
+        void releaseDeviceLock(locker)
       }
       setPendingDepositKid(null)
       setPendingDepositReceived(0)
@@ -555,6 +649,10 @@ export default function DashboardPage() {
     }, {})
   ).slice(0, 5)
   const parentPending = pendingWithdrawals
+  const parentDepositTargets = [
+    ...(parentName ? [parentName] : []),
+    ...validKidAccounts,
+  ]
   const parentChildren = validKidAccounts.map((username, index) => ({
     id: index + 1,
     name: username,
@@ -600,7 +698,7 @@ export default function DashboardPage() {
     setWithdrawNote('')
   }
 
-  const handleWithdraw = (e: React.FormEvent) => {
+  const handleWithdraw = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!canWithdraw) return
 
@@ -608,94 +706,159 @@ export default function DashboardPage() {
     const note = withdrawNote.trim() || 'Withdrawal'
 
     if (instantWithdrawals || (parentAutoApproveLimit > 0 && amount <= parentAutoApproveLimit)) {
-      setBalance((prev) => Number((prev - amount).toFixed(2)))
-      setKidBalances((prev) => ({
-        ...prev,
-        [kidName]: Number(((prev[kidName] ?? 0) - amount).toFixed(2)),
-      }))
-      setHistory((prev) => [
-        {
-          id: Date.now(),
-          child: kidName,
-          amount,
-          note,
-          when: instantWithdrawals ? 'Just now' : 'Auto-approved now',
-          kind: 'withdrawal',
-        },
-        ...prev,
-      ])
-      // Trigger machine to dispense the bills.
-      void fetch('/api/command', {
+      const lock = await acquireDeviceLock(kidName, 'withdraw')
+      if (!lock.ok) {
+        alert(`❌ ${lock.message}`)
+        return
+      }
+
+      const res = await fetch('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: `WITHDRAW ${Math.round(amount)}` }),
+        body: JSON.stringify({
+          command: `WITHDRAW ${Math.round(amount)}`,
+          account: kidName,
+          lockOwner: kidName,
+          role: 'kid',
+          autoCreate: true,
+          note,
+        }),
       })
+
+      await releaseDeviceLock(kidName)
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Withdrawal failed' }))
+        alert(`❌ ${data.error ?? 'Withdrawal failed'}`)
+        return
+      }
+
+      const updatedBalance = await fetchAccountBalance(kidName)
+      if (updatedBalance !== null) {
+        setBalance(updatedBalance)
+        setKidBalances((prev) => ({ ...prev, [kidName]: updatedBalance }))
+      }
+
+      const txRes = await fetch(`/api/accounts/transactions?username=${encodeURIComponent(kidName)}`, { cache: 'no-store' })
+      if (txRes.ok) {
+        const txData = await txRes.json() as { transactions: Array<{ id: number; child: string; amount: number; signedAmount?: number; note: string; when: string; kind: string }> }
+        setHistory(
+          txData.transactions.map((entry) => ({
+            id: entry.id,
+            child: entry.child,
+            amount: Math.abs(entry.signedAmount ?? entry.amount),
+            note: entry.note,
+            when: entry.when,
+            kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+          }))
+        )
+      }
     } else {
-      setPendingWithdrawals((prev) => {
-        const next = [
-          {
-            id: Date.now(),
-            child: kidName,
-            amount,
-            note,
-            createdAt: 'Just now',
-          },
-          ...prev,
-        ]
-        localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
-        return next
+      const createRes = await fetch('/api/pending-withdrawals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ child: kidName, amount, note }),
       })
+      if (!createRes.ok) {
+        const data = await createRes.json().catch(() => ({ error: 'Failed to create withdrawal request' }))
+        alert(`❌ ${data.error ?? 'Failed to create withdrawal request'}`)
+        return
+      }
+
+      const pendingRes = await fetch('/api/pending-withdrawals', { cache: 'no-store' })
+      if (pendingRes.ok) {
+        const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+        setPendingWithdrawals(pendingData.pending)
+      }
     }
 
     resetWithdrawForm()
   }
 
-  const approvePending = (id: number) => {
+  const approvePending = async (id: number) => {
     const request = pendingWithdrawals.find((item) => item.id === id)
     if (!request) return
-    const childBalance = kidBalances[request.child] ?? 0
-    if (request.amount > childBalance) return
 
-    setKidBalances((prev) => ({
-      ...prev,
-      [request.child]: Number(((prev[request.child] ?? 0) - request.amount).toFixed(2)),
-    }))
-    setHistory((prev) => [
-      {
-        id: Date.now(),
-        child: request.child,
-        amount: request.amount,
-        note: request.note,
-        when: 'Approved now',
-        kind: 'withdrawal',
-      },
-      ...prev,
-    ])
-    setPendingWithdrawals((prev) => {
-      const next = prev.filter((item) => item.id !== id)
-      localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
-      return next
-    })
-    const approved = loadApprovedPendingIds()
-    const mergedApproved = [...approved, id].slice(-300)
-    localStorage.setItem(STORAGE_KEYS.approvedPendingIds, JSON.stringify(mergedApproved))
-    // Trigger machine to dispense the approved bills.
-    void fetch('/api/command', {
+    const locker = parentName || request.child
+    const lock = await acquireDeviceLock(locker, 'withdraw')
+    if (!lock.ok) {
+      alert(`❌ ${lock.message}`)
+      return
+    }
+
+    const commandRes = await fetch('/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: `WITHDRAW ${Math.round(request.amount)}` }),
+      body: JSON.stringify({
+        command: `WITHDRAW ${Math.round(request.amount)}`,
+        account: request.child,
+        lockOwner: locker,
+        role: 'kid',
+        autoCreate: true,
+        note: request.note,
+      }),
     })
+
+    await releaseDeviceLock(locker)
+
+    if (!commandRes.ok) {
+      const data = await commandRes.json().catch(() => ({ error: 'Failed to process withdrawal request' }))
+      alert(`❌ ${data.error ?? 'Failed to process withdrawal request'}`)
+      return
+    }
+
+    await fetch(`/api/pending-withdrawals?id=${id}`, { method: 'DELETE' })
+
+    const [kidsRes, pendingRes, txRes] = await Promise.all([
+      fetch('/api/auth/kids', { cache: 'no-store' }),
+      fetch('/api/pending-withdrawals', { cache: 'no-store' }),
+      fetch('/api/accounts/transactions', { cache: 'no-store' }),
+    ])
+
+    if (kidsRes.ok) {
+      const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+      const balances = kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+        acc[kid.username] = kid.balance
+        return acc
+      }, {})
+      setKidBalances(balances)
+    }
+    if (pendingRes.ok) {
+      const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+      setPendingWithdrawals(pendingData.pending)
+    }
+    if (txRes.ok) {
+      const txData = await txRes.json() as { transactions: Array<{ id: number; child: string; amount: number; signedAmount?: number; note: string; when: string; kind: string }> }
+      setHistory(
+        txData.transactions.map((entry) => ({
+          id: entry.id,
+          child: entry.child,
+          amount: Math.abs(entry.signedAmount ?? entry.amount),
+          note: entry.note,
+          when: entry.when,
+          kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+        }))
+      )
+    }
   }
 
-  const declinePending = (id: number) => {
-      setPendingWithdrawals((prev) => {
-        const next = prev.filter((item) => item.id !== id)
-        localStorage.setItem(STORAGE_KEYS.pending, JSON.stringify(next))
-        return next
-      })
+  const declinePending = async (id: number) => {
+    const res = await fetch(`/api/pending-withdrawals?id=${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      alert('❌ Failed to decline request')
+      return
+    }
+    setPendingWithdrawals((prev) => prev.filter((item) => item.id !== id))
   }
 
   const startParentDepositFlow = async (username: string) => {
+    const locker = parentName || username
+    const lock = await acquireDeviceLock(locker, 'deposit')
+    if (!lock.ok) {
+      alert(`❌ ${lock.message}`)
+      return
+    }
+
     // Snapshot current max ID, then clear — so only deposits AFTER this
     // moment are counted.
     try {
@@ -716,6 +879,10 @@ export default function DashboardPage() {
   }
 
   const cancelParentDepositFlow = () => {
+    const locker = parentName || pendingDepositKid || ''
+    if (locker) {
+      void releaseDeviceLock(locker)
+    }
     parentLastSeenDepositIdRef.current = 0
     setPendingDepositKid(null)
     setPendingDepositTarget(0)
@@ -795,10 +962,16 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => {
-              // Snapshot current max deposit ID first, then clear.
-              // This ensures polling only picks up deposits created AFTER
-              // the button was tapped, not old ones still in the DB.
               void (async () => {
+                const lock = await acquireDeviceLock(kidName, 'deposit')
+                if (!lock.ok) {
+                  alert(`❌ ${lock.message}`)
+                  return
+                }
+
+                // Snapshot current max deposit ID first, then clear.
+                // This ensures polling only picks up deposits created AFTER
+                // the button was tapped, not old ones still in the DB.
                 try {
                   const res = await fetch('/api/deposit', { cache: 'no-store' })
                   const data = await res.json() as { deposits: { id: number }[] }
@@ -1262,10 +1435,18 @@ export default function DashboardPage() {
         <>
           <div className="glass-card">
             <h2 className="text-lg sm:text-2xl font-sora font-bold text-blue-700 mb-3">Quick Actions</h2>
+            {parentName && (
+              <div className="mb-4 rounded-xl bg-white/70 px-4 py-3 flex items-center justify-between">
+                <p className="font-inter font-semibold text-gray-800">Parent Wallet ({parentName})</p>
+                <p className="font-sora font-bold text-blue-700">{formatPHP(parentBalance)}</p>
+              </div>
+            )}
             <div className="grid md:grid-cols-2 gap-4">
-              {validKidAccounts.map((username) => (
+              {parentDepositTargets.map((username) => (
                 <div key={username} className="bg-white/70 rounded-xl p-4">
-                  <p className="font-inter font-semibold text-gray-800 mb-2">Add Money to {username}</p>
+                  <p className="font-inter font-semibold text-gray-800 mb-2">
+                    {username === parentName ? 'Add Money to Parent Wallet' : `Add Money to ${username}`}
+                  </p>
                   <button
                     type="button"
                     onClick={() => startParentDepositFlow(username)}
@@ -1626,7 +1807,7 @@ export default function DashboardPage() {
               />
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   if (!newKidUsername.trim() || !newKidPassword.trim() || !newKidSecurityAnswer.trim()) {
                     alert('Please enter username, password, and security answer')
                     return
@@ -1641,22 +1822,42 @@ export default function DashboardPage() {
                     alert('This username already exists!')
                     return
                   }
-                  // Store the password
-                  localStorage.setItem(`cash_kid_pwd_${username}`, newKidPassword)
-                  // Store the security question and answer
-                  localStorage.setItem(`cash_kid_sec_question_${username}`, finalQuestion)
-                  localStorage.setItem(`cash_kid_sec_answer_${username}`, newKidSecurityAnswer.trim().toLowerCase())
-                  // Update the accounts list
-                  setValidKidAccounts(prev => [...prev, username])
-                  // Initialize balance to 0
-                  setKidBalances(prev => ({ ...prev, [username]: 0 }))
+
+                  const res = await fetch('/api/auth/kids', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      username,
+                      password: newKidPassword,
+                      securityQuestion: finalQuestion,
+                      securityAnswer: newKidSecurityAnswer.trim().toLowerCase(),
+                    }),
+                  })
+                  if (!res.ok) {
+                    const data = await res.json().catch(() => ({ error: 'Failed to create kid account' }))
+                    alert(`❌ ${data.error ?? 'Failed to create kid account'}`)
+                    return
+                  }
+
+                  const kidsRes = await fetch('/api/auth/kids', { cache: 'no-store' })
+                  if (kidsRes.ok) {
+                    const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+                    setValidKidAccounts(kidsData.kids.map((kid) => kid.username))
+                    setKidBalances(
+                      kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+                        acc[kid.username] = kid.balance
+                        return acc
+                      }, {})
+                    )
+                  }
+
                   // Clear the form
                   setNewKidUsername('')
                   setNewKidPassword('')
                   setNewKidSecurityQuestion("What's your favorite pet?")
                   setNewKidSecurityAnswer('')
                   setNewKidCustomQuestion('')
-                  alert(`✅ Kid account "${username}" created successfully!`)
+                  alert(`✅ Kid account "${username}" created successfully in database!`)
                 }}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-sora font-semibold py-2 px-4 rounded-lg transition-all"
               >
@@ -1677,16 +1878,29 @@ export default function DashboardPage() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => {
+                      onClick={async () => {
                         if (window.confirm(`Delete kid account "${username}"? This cannot be undone.`)) {
-                          localStorage.removeItem(`cash_kid_pwd_${username}`)
-                          setValidKidAccounts(prev => prev.filter(u => u !== username))
-                          setKidBalances(prev => {
-                            const newBalances = { ...prev }
-                            delete newBalances[username]
-                            return newBalances
+                          const res = await fetch(`/api/auth/kids?username=${encodeURIComponent(username)}`, {
+                            method: 'DELETE',
                           })
-                          alert(`✅ Kid account "${username}" has been deleted.`)
+                          if (!res.ok) {
+                            const data = await res.json().catch(() => ({ error: 'Failed to delete kid account' }))
+                            alert(`❌ ${data.error ?? 'Failed to delete kid account'}`)
+                            return
+                          }
+
+                          const kidsRes = await fetch('/api/auth/kids', { cache: 'no-store' })
+                          if (kidsRes.ok) {
+                            const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+                            setValidKidAccounts(kidsData.kids.map((kid) => kid.username))
+                            setKidBalances(
+                              kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+                                acc[kid.username] = kid.balance
+                                return acc
+                              }, {})
+                            )
+                          }
+                          alert(`✅ Kid account "${username}" has been deleted from database.`)
                         }
                       }}
                       className="text-red-600 hover:text-red-700 font-inter font-semibold text-sm transition-colors"
@@ -1709,22 +1923,24 @@ export default function DashboardPage() {
             </p>
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 if (window.confirm('Are you absolutely sure? This will delete ALL data including all accounts, balances, goals, and transactions. This cannot be undone.')) {
-                  const existingKidAccounts = JSON.parse(localStorage.getItem(STORAGE_KEYS.validKidAccounts) || '[]')
-                  // Clear all localStorage keys from STORAGE_KEYS
-                  Object.values(STORAGE_KEYS).forEach(key => {
+                  const res = await fetch('/api/admin/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm: 'RESET_ALL_DATA' }),
+                  })
+                  if (!res.ok) {
+                    const data = await res.json().catch(() => ({ error: 'Failed to reset data' }))
+                    alert(`❌ ${data.error ?? 'Failed to reset data'}`)
+                    return
+                  }
+
+                  Object.values(STORAGE_KEYS).forEach((key) => {
                     localStorage.removeItem(key)
                   })
-                  // Clear parent account
-                  localStorage.removeItem('cash_parent_account')
-                  // Clear all kid passwords
-                  existingKidAccounts.forEach((username: string) => {
-                    localStorage.removeItem(`cash_kid_pwd_${username}`)
-                  })
-                  // Clear sessionStorage
                   sessionStorage.clear()
-                  // Redirect to home page
+                  alert('✅ All accounts, balances, inventory, and transactions were reset.')
                   router.push('/')
                 }
               }}
@@ -1882,6 +2098,9 @@ export default function DashboardPage() {
                 onClick={() => {
                   setPendingDepositReceived(0)
                   setKidDepositModalOpen(false)
+                  if (kidName) {
+                    void releaseDeviceLock(kidName)
+                  }
                 }}
                 className="w-full rounded-xl bg-gray-200 text-gray-800 px-4 py-2 font-inter font-semibold"
               >

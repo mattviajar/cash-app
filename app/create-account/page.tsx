@@ -28,7 +28,7 @@ export default function CreateAccountPage() {
     customQuestion: ''
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const normalizedUsername = formData.username.trim().toLowerCase()
     
@@ -54,26 +54,26 @@ export default function CreateAccountPage() {
       return
     }
 
-    // Check if parent account already exists
-    const existingParent = localStorage.getItem('cash_parent_account')
-    if (existingParent) {
-      alert('❌ A parent account already exists. Please login instead.')
-      router.push('/login')
+    finalQuestion = finalQuestion.trim()
+
+    const res = await fetch('/api/auth/register-parent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: normalizedUsername,
+        password: formData.password,
+        securityQuestion: finalQuestion,
+        securityAnswer: formData.securityAnswer.trim().toLowerCase(),
+      }),
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Failed to create parent account' }))
+      alert(`❌ ${data.error ?? 'Failed to create parent account'}`)
       return
     }
 
-    // Save parent account to localStorage
-    finalQuestion = finalQuestion.trim()
-    const parentAccount = {
-      username: normalizedUsername,
-      email: formData.email,
-      password: formData.password,
-      securityQuestion: finalQuestion,
-      securityAnswer: formData.securityAnswer.trim().toLowerCase()
-    }
-    localStorage.setItem('cash_parent_account', JSON.stringify(parentAccount))
-    
-    alert('✅ Parent account created successfully! You can now login.')
+    alert('✅ Parent account created successfully in database! You can now login.')
     router.push('/login')
   }
 

@@ -23,10 +23,12 @@ SoftwareSerial espSerial(18, 19);  // RX on A4 (pin 18), TX on A5 (pin 19)
 namespace {
 
 constexpr long SERIAL_BAUD = 9600;
-constexpr float FULL_RUN_SPEED_STEPS_PER_SEC = 1200.0f;
-constexpr float DEFAULT_RUN_SPEED_STEPS_PER_SEC = FULL_RUN_SPEED_STEPS_PER_SEC;
-constexpr unsigned long MOTOR1_FORWARD_RUN_MS = 9000;
-constexpr unsigned long MOTOR1_BACKWARD_RUN_MS = 9000;
+constexpr float MOTOR1_RUN_SPEED_STEPS_PER_SEC = 1200.0f;
+constexpr float DEFAULT_RUN_SPEED_STEPS_PER_SEC = 1400.0f;
+constexpr float MOTOR1_ACCEL_STEPS_PER_SEC2 = 500.0f;
+constexpr float DEFAULT_ACCEL_STEPS_PER_SEC2 = 650.0f;
+constexpr unsigned long MOTOR1_FORWARD_RUN_MS = 14000;
+constexpr unsigned long MOTOR1_BACKWARD_RUN_MS = 14000;
 constexpr unsigned long DEFAULT_FORWARD_RUN_MS = 10000;
 constexpr unsigned long DEFAULT_BACKWARD_RUN_MS = 10000;
 constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000; // 15 minutes safety cap
@@ -38,7 +40,6 @@ constexpr uint8_t IR_10_PESO_PIN = A2;
 constexpr uint8_t IR_20_PESO_PIN = A3;
 
 constexpr bool IR_ACTIVE_LOW = true;
-constexpr unsigned long IR_DETECT_HOLD_MS = 25;
 
 // 3 remote motors on Uno (motor 4 is local on ESP32 firmware).
 AccelStepper motor1(AccelStepper::HALF4WIRE, 2, 4, 3, 5);     // 1 peso
@@ -57,9 +58,9 @@ struct MotorSlot {
 };
 
 MotorSlot slots[] = {
-  {1, 1, IR_1_PESO_PIN, &motor1, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, MOTOR1_FORWARD_RUN_MS, MOTOR1_BACKWARD_RUN_MS},
-  {2, 5, IR_5_PESO_PIN, &motor2, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
-  {3, 10, IR_10_PESO_PIN, &motor3, FULL_RUN_SPEED_STEPS_PER_SEC, FULL_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
+  {1, 1, IR_1_PESO_PIN, &motor1, MOTOR1_RUN_SPEED_STEPS_PER_SEC, MOTOR1_RUN_SPEED_STEPS_PER_SEC, MOTOR1_FORWARD_RUN_MS, MOTOR1_BACKWARD_RUN_MS},
+  {2, 5, IR_5_PESO_PIN, &motor2, DEFAULT_RUN_SPEED_STEPS_PER_SEC, DEFAULT_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
+  {3, 10, IR_10_PESO_PIN, &motor3, DEFAULT_RUN_SPEED_STEPS_PER_SEC, DEFAULT_RUN_SPEED_STEPS_PER_SEC, DEFAULT_FORWARD_RUN_MS, DEFAULT_BACKWARD_RUN_MS},
 };
 
 constexpr size_t SLOT_COUNT = sizeof(slots) / sizeof(slots[0]);
@@ -78,14 +79,15 @@ struct DispenseJob {
   JobPhase phase;
   unsigned long phaseStartedMs;
   unsigned long cycleStartedMs;
-  unsigned long detectStartedMs;
   bool cycleDetected;
+  bool lastBlockedState;
   unsigned long deadlineMs;
 };
 
 DispenseJob job = {};
 String serialBuffer;
 bool irLastState[4] = {false, false, false, false};
+bool frameSync = false;
 
 uint8_t irPinByIndex(uint8_t index) {
   switch (index) {
@@ -198,8 +200,9 @@ void startDispense(uint8_t motorNumber, uint8_t count) {
   stopAllSteppers();
   slot->stepper->enableOutputs();
   const float forwardSpeed = slot->forwardSpeedStepsPerSec >= 0 ? slot->forwardSpeedStepsPerSec : -slot->forwardSpeedStepsPerSec;
+  const float accel = (slot->motorNumber == 1) ? MOTOR1_ACCEL_STEPS_PER_SEC2 : DEFAULT_ACCEL_STEPS_PER_SEC2;
   slot->stepper->setMaxSpeed(forwardSpeed);
-  slot->stepper->setAcceleration(400.0f);
+  slot->stepper->setAcceleration(accel);
   slot->stepper->moveTo(2000000L);
 
   job.active = true;
@@ -210,8 +213,8 @@ void startDispense(uint8_t motorNumber, uint8_t count) {
   job.phase = JOB_FORWARD;
   job.phaseStartedMs = now;
   job.cycleStartedMs = now;
-  job.detectStartedMs = 0;
   job.cycleDetected = false;
+  job.lastBlockedState = readIrBlocked(slot->irPin);
   job.deadlineMs = now + JOB_MAX_RUNTIME_MS;
 
   espSerial.print(F("OK DISPENSE motor="));
@@ -243,25 +246,27 @@ void handleDispenseJob() {
 
   const float forwardSpeed = slot->forwardSpeedStepsPerSec >= 0 ? slot->forwardSpeedStepsPerSec : -slot->forwardSpeedStepsPerSec;
   const float backwardSpeed = slot->backwardSpeedStepsPerSec >= 0 ? slot->backwardSpeedStepsPerSec : -slot->backwardSpeedStepsPerSec;
+  const float accel = (slot->motorNumber == 1) ? MOTOR1_ACCEL_STEPS_PER_SEC2 : DEFAULT_ACCEL_STEPS_PER_SEC2;
   const bool blocked = readIrBlocked(slot->irPin);
 
-  if (!job.cycleDetected) {
-    if (blocked) {
-      if (job.detectStartedMs == 0) {
-        job.detectStartedMs = now;
-      } else if (now - job.detectStartedMs >= IR_DETECT_HOLD_MS) {
-        job.cycleDetected = true;
-      }
-    } else {
-      job.detectStartedMs = 0;
-    }
-
+  if (!job.cycleDetected && blocked && !job.lastBlockedState) {
+    job.cycleDetected = true;
+    espSerial.print(F("HIT motor="));
+    espSerial.print(job.motorNumber);
+    espSerial.print(F(" t="));
+    espSerial.println(now - job.cycleStartedMs);
   }
+
+  job.lastBlockedState = blocked;
 
   if (job.phase == JOB_FORWARD) {
     if (now - job.phaseStartedMs >= slot->forwardRunMs) {
+      espSerial.print(F("PHASE motor="));
+      espSerial.print(job.motorNumber);
+      espSerial.print(F(" forward_ms="));
+      espSerial.println(now - job.phaseStartedMs);
       slot->stepper->setMaxSpeed(backwardSpeed);
-      slot->stepper->setAcceleration(400.0f);
+      slot->stepper->setAcceleration(accel);
       slot->stepper->moveTo(-2000000L);
       job.phase = JOB_BACKWARD;
       job.phaseStartedMs = now;
@@ -271,6 +276,10 @@ void handleDispenseJob() {
 
   if (job.phase == JOB_BACKWARD) {
     if (now - job.phaseStartedMs >= slot->backwardRunMs) {
+      espSerial.print(F("PHASE motor="));
+      espSerial.print(job.motorNumber);
+      espSerial.print(F(" backward_ms="));
+      espSerial.println(now - job.phaseStartedMs);
       if (job.cycleDetected) {
         ++job.dispensedCount;
         if (job.dispensedCount >= job.targetCount) {
@@ -281,13 +290,13 @@ void handleDispenseJob() {
       }
 
       slot->stepper->setMaxSpeed(forwardSpeed);
-      slot->stepper->setAcceleration(400.0f);
-      slot->stepper->moveTo(2000000L);
+      slot->stepper->setAcceleration(accel);
+    slot->stepper->moveTo(2000000L);
       job.phase = JOB_FORWARD;
       job.phaseStartedMs = now;
       job.cycleStartedMs = now;
-      job.detectStartedMs = 0;
       job.cycleDetected = false;
+      job.lastBlockedState = blocked;
     }
     return;
   }
@@ -299,9 +308,30 @@ void handleCommand(String line) {
     return;
   }
 
-  line.toUpperCase();
+  // Sanitize incoming text: keep only letters/digits/spaces so noisy bytes don't break parsing.
+  String clean;
+  clean.reserve(line.length());
+  for (int index = 0; index < line.length(); ++index) {
+    char c = line[index];
+    if (c >= 'a' && c <= 'z') {
+      c = static_cast<char>(c - ('a' - 'A'));
+    }
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ') {
+      clean += c;
+      continue;
+    }
+    if (c == '\t') {
+      clean += ' ';
+    }
+  }
+  clean.trim();
+  if (clean.length() == 0) {
+    return;
+  }
 
-  if (line == F("PING")) {
+  line = clean;
+
+  if (line == F("PING") || line == F("PINGUNO") || line.startsWith(F("PING ")) || line.endsWith(F(" PING")) || line.indexOf(F(" PING ")) >= 0) {
     espSerial.println(F("PONG"));
     return;
   }
@@ -325,24 +355,35 @@ void handleCommand(String line) {
 
   int motorNumber = 0;
   int count = 0;
-  if (sscanf(line.c_str(), "DISPENSE %d %d", &motorNumber, &count) == 2) {
+  const bool hasDispenseToken = line.startsWith(F("DISPENSE")) || line.startsWith(F("DISP")) || line.indexOf(F(" DISPENSE")) >= 0 || line.indexOf(F(" DISP")) >= 0;
+  if (hasDispenseToken && sscanf(line.c_str(), "%*[^0-9]%d %d", &motorNumber, &count) == 2) {
     startDispense(static_cast<uint8_t>(motorNumber), static_cast<uint8_t>(count));
     return;
   }
 
-  espSerial.println(F("ERR motor=0 reason=unknown-command"));
+  espSerial.print(F("ERR motor=0 reason=unknown-command cmd="));
+  espSerial.println(line);
 }
 
 void readSerialLines() {
   // Read from ESP32 via SoftwareSerial
   while (espSerial.available() > 0) {
     const char incoming = static_cast<char>(espSerial.read());
+    if (incoming == '@') {
+      serialBuffer = "";
+      frameSync = true;
+      continue;
+    }
+    if (!frameSync) {
+      continue;
+    }
     if (incoming == '\r') {
       continue;
     }
     if (incoming == '\n') {
       handleCommand(serialBuffer);
       serialBuffer = "";
+      frameSync = false;
       continue;
     }
     if (serialBuffer.length() < 80) {
@@ -366,7 +407,7 @@ void pollIrEdgeLogs() {
 
 void setupMotor(AccelStepper& motor) {
   motor.setMaxSpeed(DEFAULT_RUN_SPEED_STEPS_PER_SEC);
-  motor.setAcceleration(400.0f);
+  motor.setAcceleration(DEFAULT_ACCEL_STEPS_PER_SEC2);
   motor.disableOutputs();
 }
 

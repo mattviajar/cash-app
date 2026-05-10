@@ -7,52 +7,52 @@ datasource db {
 }
 
 model Account {
-  id               String         @id @default(cuid())
-  username         String         @unique
+  id               String          @id @default(cuid())
+  username         String          @unique
   passwordHash     String
   role             String
   securityQuestion String?
   securityAnswer   String?
-  balance          Float          @default(0)
-  character        String         @default("astronaut")
-  showBalance      Boolean        @default(true)
-  requireNote      Boolean        @default(false)
-  dailyLimit       Float          @default(25)
-  notifications    Boolean        @default(true)
-  createdAt        DateTime       @default(now())
-  transactions     Transaction[]
+  balance          Float           @default(0)
+  character        String          @default("astronaut")
+  showBalance      Boolean         @default(true)
+  requireNote      Boolean         @default(false)
+  dailyLimit       Float           @default(25)
+  notifications    Boolean         @default(true)
+  createdAt        DateTime        @default(now())
   goals            Goal[]
   parentSettings   ParentSettings?
+  transactions     Transaction[]
 }
 
 model Transaction {
   id        Int      @id @default(autoincrement())
   accountId String
-  account   Account  @relation(fields: [accountId], references: [id])
   amount    Float
   note      String
   kind      String   @default("manual")
   when      String   @default("Just now")
   createdAt DateTime @default(now())
+  account   Account  @relation(fields: [accountId], references: [id])
 }
 
 model Goal {
   id        String   @id @default(cuid())
   accountId String
-  account   Account  @relation(fields: [accountId], references: [id])
   name      String
   target    Float
   saved     Float    @default(0)
   createdAt DateTime @default(now())
+  account   Account  @relation(fields: [accountId], references: [id])
 }
 
 model ParentSettings {
   id                 String  @id @default(cuid())
   accountId          String  @unique
-  account            Account @relation(fields: [accountId], references: [id])
   instantWithdrawals Boolean @default(false)
   autoApproveLimit   Float   @default(0)
   spendingAlerts     Boolean @default(true)
+  account            Account @relation(fields: [accountId], references: [id])
 }
 
 model PendingWithdrawal {
@@ -75,3 +75,37 @@ model CommandQueue {
   createdAt DateTime @default(now())
 }
 
+model MachineInventory {
+  id        Int      @id @default(1)
+  bill20    Int      @default(0)
+  bill50    Int      @default(0)
+  bill100   Int      @default(0)
+  bill500   Int      @default(0)
+  bill1000  Int      @default(0)
+  coin1     Int      @default(0)
+  coin5     Int      @default(0)
+  coin10    Int      @default(0)
+  coin20    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MachineCashEvent {
+  id              Int      @id @default(autoincrement())
+  direction       String
+  amount          Float
+  accountUsername String?
+  note            String?
+  source          String?
+  breakdown       Json?
+  createdAt       DateTime @default(now())
+}
+
+model DeviceLock {
+  id          Int      @id @default(1)
+  holder      String?
+  mode        String?
+  acquiredAt  DateTime?
+  expiresAt   DateTime?
+  updatedAt   DateTime @updatedAt
+}

@@ -141,6 +141,11 @@ constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
 constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
 constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
 constexpr unsigned long COMMAND_POLL_MS = 10000;
+constexpr unsigned long COMMAND_POLL_RETRY_MS = 15000;
+constexpr uint16_t COMMAND_HTTP_TIMEOUT_MS = 5000;
+constexpr bool COMMAND_POLL_VERBOSE = true;
+constexpr unsigned long LOOP_HEARTBEAT_MS = 3000;
+constexpr unsigned long COMMAND_SKIP_LOG_MS = 5000;
 
 struct MotorState {
   int sequenceIndex;
@@ -148,6 +153,7 @@ struct MotorState {
 
 constexpr unsigned long M4_FORWARD_RUN_MS  = 14000;
 constexpr unsigned long M4_BACKWARD_RUN_MS = 10000;
+constexpr unsigned long M4_STEP_INTERVAL_US = 1500;
 
 struct LocalDispenseJob {
   bool active;
@@ -274,6 +280,8 @@ unsigned long lastWifiAttemptMs = 0;
 unsigned long lastCommandPollMs = 0;
 unsigned long lastCommandPollErrorMs = 0;
 uint8_t commandPollFailures = 0;
+unsigned long lastLoopHeartbeatMs = 0;
+unsigned long lastCommandSkipLogMs = 0;
 
 HardwareSerial UnoSerial(2);
 uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
@@ -451,7 +459,10 @@ void postDeposit(float amount, const char* source, uint8_t pulses) {
   }
   
   http.addHeader("Content-Type", "application/json");
-  const String body = String("{\"amount\":") + String(amount, 2) + "}";
+  const String body = String("{\"amount\":") + String(amount, 2) +
+                      String(",\"source\":\"") + String(source) +
+                      String("\",\"pulses\":") + String(pulses) +
+                      String("}");
   
   Serial.print(F("POST body: "));
   Serial.println(body);
@@ -475,23 +486,53 @@ void pollRemoteCommands() {
     return;
   }
 
+  const unsigned long nowMs = millis();
+
   // Never block pulse-sensitive paths while acceptor pulses are in progress.
   if (coinInput.pulseActive || billInput.pulseActive || coinInput.pending || billInput.pending) {
+    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
+      lastCommandSkipLogMs = nowMs;
+      Serial.print(F("CMD POLL skip=pulse-active coinActive="));
+      Serial.print(coinInput.pulseActive ? F("1") : F("0"));
+      Serial.print(F(" billActive="));
+      Serial.print(billInput.pulseActive ? F("1") : F("0"));
+      Serial.print(F(" coinPending="));
+      Serial.print(coinInput.pending ? F("1") : F("0"));
+      Serial.print(F(" billPending="));
+      Serial.println(billInput.pending ? F("1") : F("0"));
+    }
     return;
   }
 
   // Avoid extra network activity while local motion tasks are active.
   if (motor4Job.active || withdrawJob.active || billRoute.active) {
+    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
+      lastCommandSkipLogMs = nowMs;
+      Serial.print(F("CMD POLL skip=motion-active m4="));
+      Serial.print(motor4Job.active ? F("1") : F("0"));
+      Serial.print(F(" withdraw="));
+      Serial.print(withdrawJob.active ? F("1") : F("0"));
+      Serial.print(F(" route="));
+      Serial.println(billRoute.active ? F("1") : F("0"));
+    }
     return;
   }
 
   if (!ensureWifi()) {
+    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
+      lastCommandSkipLogMs = nowMs;
+      Serial.println(F("CMD POLL skip=wifi-disconnected"));
+    }
     return;
   }
 
-  const unsigned long nowMs = millis();
-  const unsigned long pollDelayMs = commandPollFailures > 0 ? 60000UL : COMMAND_POLL_MS;
+  const unsigned long pollDelayMs = commandPollFailures > 0 ? COMMAND_POLL_RETRY_MS : COMMAND_POLL_MS;
   if (nowMs - lastCommandPollMs < pollDelayMs) {
+    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
+      lastCommandSkipLogMs = nowMs;
+      Serial.print(F("CMD POLL wait remainingMs="));
+      Serial.println(pollDelayMs - (nowMs - lastCommandPollMs));
+    }
     return;
   }
   lastCommandPollMs = nowMs;
@@ -500,8 +541,8 @@ void pollRemoteCommands() {
   secureClient.setInsecure(); // skip cert verification
 
   HTTPClient http;
-  http.setConnectTimeout(250);
-  http.setTimeout(250);
+  http.setConnectTimeout(COMMAND_HTTP_TIMEOUT_MS);
+  http.setTimeout(COMMAND_HTTP_TIMEOUT_MS);
 
   String url = String(COMMAND_API_URL);
   if (url.indexOf('?') >= 0) {
@@ -518,13 +559,13 @@ void pollRemoteCommands() {
 
   const int status = http.GET();
   if (status != 200) {
-    if (commandPollFailures == 0) {
-      Serial.print(F("WARN: command HTTP poll failed: "));
-      if (status < 0) {
-        Serial.println(http.errorToString(status));
-      } else {
-        Serial.println(status);
-      }
+    Serial.print(F("WARN: command HTTP poll failed count="));
+    Serial.print(commandPollFailures + 1);
+    Serial.print(F(" err="));
+    if (status < 0) {
+      Serial.println(http.errorToString(status));
+    } else {
+      Serial.println(status);
     }
     commandPollFailures = static_cast<uint8_t>(min<int>(commandPollFailures + 1, 10));
     lastCommandPollErrorMs = nowMs;
@@ -539,55 +580,83 @@ void pollRemoteCommands() {
   const String payload = http.getString();
   http.end();
 
+  if (COMMAND_POLL_VERBOSE) {
+    Serial.print(F("CMD POLL payload="));
+    Serial.println(payload);
+  }
+
+  bool handledCommand = false;
   const int keyIndex = payload.indexOf("\"commands\"");
-  if (keyIndex < 0) {
-    return;
+  if (keyIndex >= 0) {
+    const int listStart = payload.indexOf('[', keyIndex);
+    const int listEnd = payload.indexOf(']', listStart);
+    if (listStart >= 0 && listEnd >= 0 && listEnd > listStart) {
+      int scan = listStart + 1;
+      while (scan < listEnd) {
+        const int open = payload.indexOf('"', scan);
+        if (open < 0 || open >= listEnd) {
+          break;
+        }
+
+        String cmd;
+        bool escaping = false;
+        int close = open + 1;
+        for (; close < listEnd; ++close) {
+          const char ch = payload.charAt(close);
+          if (escaping) {
+            cmd += ch;
+            escaping = false;
+            continue;
+          }
+          if (ch == '\\') {
+            escaping = true;
+            continue;
+          }
+          if (ch == '"') {
+            break;
+          }
+          cmd += ch;
+        }
+
+        if (close >= listEnd) {
+          break;
+        }
+
+        cmd.trim();
+        if (cmd.length() > 0) {
+          Serial.print(F("REMOTE CMD: "));
+          Serial.println(cmd);
+          handleUsbCommand(cmd);
+          handledCommand = true;
+        }
+
+        scan = close + 1;
+      }
+    }
   }
-  const int listStart = payload.indexOf('[', keyIndex);
-  const int listEnd = payload.indexOf(']', listStart);
-  if (listStart < 0 || listEnd < 0 || listEnd <= listStart) {
-    return;
+
+  // Compatibility fallback in case backend returns a single command string.
+  if (!handledCommand) {
+    const int singleKey = payload.indexOf("\"command\"");
+    if (singleKey >= 0) {
+      const int colon = payload.indexOf(':', singleKey);
+      const int firstQuote = payload.indexOf('"', colon + 1);
+      const int secondQuote = payload.indexOf('"', firstQuote + 1);
+      if (colon >= 0 && firstQuote >= 0 && secondQuote > firstQuote) {
+        String cmd = payload.substring(firstQuote + 1, secondQuote);
+        cmd.trim();
+        if (cmd.length() > 0) {
+          Serial.print(F("REMOTE CMD: "));
+          Serial.println(cmd);
+          handleUsbCommand(cmd);
+          handledCommand = true;
+        }
+      }
+    }
   }
 
-  int scan = listStart + 1;
-  while (scan < listEnd) {
-    const int open = payload.indexOf('"', scan);
-    if (open < 0 || open >= listEnd) {
-      break;
-    }
-
-    String cmd;
-    bool escaping = false;
-    int close = open + 1;
-    for (; close < listEnd; ++close) {
-      const char ch = payload.charAt(close);
-      if (escaping) {
-        cmd += ch;
-        escaping = false;
-        continue;
-      }
-      if (ch == '\\') {
-        escaping = true;
-        continue;
-      }
-      if (ch == '"') {
-        break;
-      }
-      cmd += ch;
-    }
-
-    if (close >= listEnd) {
-      break;
-    }
-
-    cmd.trim();
-    if (cmd.length() > 0) {
-      Serial.print(F("REMOTE CMD: "));
-      Serial.println(cmd);
-      handleUsbCommand(cmd);
-    }
-
-    scan = close + 1;
+  if (COMMAND_POLL_VERBOSE && !handledCommand) {
+    Serial.println(F("CMD POLL no command"));
   }
 }
 
@@ -934,7 +1003,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.dispensedCount = 0;
   m4IrBaselineLevel = digitalRead(M4_IR_PIN);
   motor4Job.sensorArmed = !isM4IrDetected();
-  motor4Job.goingForward = false;
+  motor4Job.goingForward = true;
   motor4Job.startedMs = millis();
   motor4Job.coinDeadlineMs = motor4Job.startedMs + JOB_MAX_RUNTIME_MS;
   motor4Job.phaseStartedMs = motor4Job.startedMs;
@@ -942,7 +1011,7 @@ void startLocalMotor4(uint8_t count) {
   motor4Job.lastStepUs = micros();
   Serial.print(F("OK DISPENSE motor=4 count="));
   Serial.println(count);
-  Serial.println(F("M4 PHASE=BWD"));
+  Serial.println(F("M4 PHASE=FWD"));
 }
 
 void startNextQueuedTask() {
@@ -964,6 +1033,7 @@ void startNextQueuedTask() {
     return;
   }
 
+  UnoSerial.print('@');
   UnoSerial.print(F("DISPENSE "));
   UnoSerial.print(nextTask.motor);
   UnoSerial.print(' ');
@@ -976,6 +1046,7 @@ void stopAllDispense() {
   motor4Job = {};
   remoteTaskActive = false;
   releaseMotor4();
+  UnoSerial.print('@');
   UnoSerial.println(F("STOP"));
   Serial.println(F("OK STOP"));
 }
@@ -1611,7 +1682,7 @@ void serviceLocalMotor4() {
     Serial.print(F("M4 PHASE="));
     Serial.println(motor4Job.goingForward ? F("FWD") : F("BWD"));
   }
-  if (nowUs - motor4Job.lastStepUs >= 2200) {
+  if (nowUs - motor4Job.lastStepUs >= M4_STEP_INTERVAL_US) {
     if (motor4Job.goingForward) {
       stepMotor4Forward();
     } else {
@@ -1844,19 +1915,22 @@ void handleUsbCommand(String command) {
   if (command.length() == 0) {
     return;
   }
+  String commandUpper = command;
+  commandUpper.toUpperCase();
 
-  if (command == F("STATUS")) {
+  if (commandUpper == F("STATUS")) {
     printStatus();
+    UnoSerial.print('@');
     UnoSerial.println(F("STATUS"));
     return;
   }
-  if (command == F("ARM")) {
+  if (commandUpper == F("ARM")) {
     motionArmed = true;
     pcaAllChannelsOff();
     Serial.println(F("OK ARMED"));
     return;
   }
-  if (command == F("DISARM")) {
+  if (commandUpper == F("DISARM")) {
     motionArmed = false;
     liftToIr51Active = false;
     liftToIr51StartedMs = 0;
@@ -1866,25 +1940,26 @@ void handleUsbCommand(String command) {
     Serial.println(F("OK DISARMED"));
     return;
   }
-  if (command == F("PINGUNO")) {
+  if (commandUpper == F("PINGUNO")) {
+    UnoSerial.print('@');
     UnoSerial.println(F("PING"));
     return;
   }
-  if (command == F("STOP")) {
+  if (commandUpper == F("STOP")) {
     stopElevatorPark();
     stopAllDispense();
     return;
   }
-  if (command == F("HOME")) {
+  if (commandUpper == F("HOME")) {
     stopElevatorPark();
     homeServos();
     return;
   }
-  if (command == F("HELP")) {
+  if (commandUpper == F("HELP")) {
     printHelp();
     return;
   }
-  if (command == F("PULSEDEBUG")) {
+  if (commandUpper == F("PULSEDEBUG")) {
     pulseDebugEnabled = !pulseDebugEnabled;
     Serial.print(F("OK PULSEDEBUG="));
     Serial.println(pulseDebugEnabled ? F("1") : F("0"));
@@ -1894,16 +1969,16 @@ void handleUsbCommand(String command) {
     Serial.println(digitalRead(COIN_PIN));
     return;
   }
-  if (command == F("DIAGBILL")) {
+  if (commandUpper == F("DIAGBILL")) {
     startInputDiag(BILL_PIN, "bill", 10000);
     return;
   }
-  if (command == F("DIAGCOIN")) {
+  if (commandUpper == F("DIAGCOIN")) {
     startInputDiag(COIN_PIN, "coin", 10000);
     return;
   }
 
-  if (command == F("M4IR")) {
+  if (commandUpper == F("M4IR")) {
     const int raw = digitalRead(M4_IR_PIN);
     Serial.print(F("M4IR raw="));
     Serial.print(raw);
@@ -1916,7 +1991,7 @@ void handleUsbCommand(String command) {
   }
 
   // M4COIL a b c d — drive raw 0/1 to IN1..IN4 for hardware verification
-  if (command.startsWith(F("M4COIL "))) {
+  if (commandUpper.startsWith(F("M4COIL "))) {
     int v[4] = {0, 0, 0, 0};
     sscanf(command.c_str() + 7, "%d %d %d %d", &v[0], &v[1], &v[2], &v[3]);
     writeMotor4(v[0] & 1, v[1] & 1, v[2] & 1, v[3] & 1);
@@ -1930,7 +2005,7 @@ void handleUsbCommand(String command) {
 
   // M4PINMAP p0 p1 p2 p3 — remap which step-sequence column drives each physical IN pin
   // Default: 0 1 2 3  Try: 0 2 1 3 / 0 3 2 1 / 1 0 3 2 / etc.
-  if (command.startsWith(F("M4PINMAP "))) {
+  if (commandUpper.startsWith(F("M4PINMAP "))) {
     int p[4] = {0, 1, 2, 3};
     sscanf(command.c_str() + 9, "%d %d %d %d", &p[0], &p[1], &p[2], &p[3]);
     bool valid = true;
@@ -1946,7 +2021,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command.startsWith(F("DISPENSE "))) {
+  if (commandUpper.startsWith(F("DISPENSE "))) {
     const int firstSpace = command.indexOf(' ');
     const int secondSpace = command.indexOf(' ', firstSpace + 1);
     if (secondSpace < 0) {
@@ -1959,19 +2034,35 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command.startsWith(F("PAYOUT "))) {
+  if (commandUpper.startsWith(F("PAYOUT "))) {
     const int amount = command.substring(7).toInt();
     handlePayoutCommand(amount);
     return;
   }
 
-  if (command.startsWith(F("WITHDRAW "))) {
-    const int amount = command.substring(9).toInt();
+  if (commandUpper.startsWith(F("WITHDRAW"))) {
+    int amount = 0;
+    int firstDigit = -1;
+    for (int i = 0; i < command.length(); ++i) {
+      const char ch = command.charAt(i);
+      if (ch >= '0' && ch <= '9') {
+        firstDigit = i;
+        break;
+      }
+    }
+    if (firstDigit >= 0) {
+      amount = command.substring(firstDigit).toInt();
+    }
+    if (amount <= 0) {
+      // Compatibility default for apps that send only "WITHDRAW".
+      amount = 20;
+      Serial.println(F("WARN WITHDRAW amount missing; defaulting to 20"));
+    }
     startWithdrawJob(amount);
     return;
   }
 
-  if (command.startsWith(F("ROUTE "))) {
+  if (commandUpper.startsWith(F("ROUTE "))) {
     const int slot = command.substring(6).toInt();
     if (slot < 1 || slot > 5) {
       Serial.println(F("ERR route slot 1..5"));
@@ -1981,7 +2072,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command == F("LIFTUP")) {
+  if (commandUpper == F("LIFTUP")) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -1996,7 +2087,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command == F("LIFTDOWN")) {
+  if (commandUpper == F("LIFTDOWN")) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -2011,7 +2102,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command == F("LIFTSTOP")) {
+  if (commandUpper == F("LIFTSTOP")) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -2022,7 +2113,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command == F("LIFTTO1")) {
+  if (commandUpper == F("LIFTTO1")) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -2040,7 +2131,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command.startsWith(F("IR5-")) && command.length() == 5) {
+  if (commandUpper.startsWith(F("IR5-")) && commandUpper.length() == 5) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -2067,7 +2158,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command == F("LIFTTEST")) {
+  if (commandUpper == F("LIFTTEST")) {
     if (!motionArmed) {
       motionArmed = true;
       pcaAllChannelsOff();
@@ -2077,7 +2168,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command.startsWith(F("SERVO "))) {
+  if (commandUpper.startsWith(F("SERVO "))) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -2102,7 +2193,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (command.startsWith(F("TESTDEPOSIT "))) {
+  if (commandUpper.startsWith(F("TESTDEPOSIT "))) {
     const float amount = command.substring(12).toFloat();
     if (amount > 0 && amount <= 10000) {
       Serial.print(F("TEST: manually posting deposit "));
@@ -2283,6 +2374,7 @@ void setup() {
     }
   }
 
+  UnoSerial.print('@');
   UnoSerial.println(F("PING"));
 }
 
@@ -2311,6 +2403,19 @@ void loop() {
   pollRemoteCommands();
 
   const unsigned long nowMs = millis();
+  if (nowMs - lastLoopHeartbeatMs >= LOOP_HEARTBEAT_MS) {
+    lastLoopHeartbeatMs = nowMs;
+    Serial.print(F("ALIVE wifi="));
+    Serial.print(WiFi.status());
+    Serial.print(F(" ip="));
+    Serial.print(WiFi.localIP());
+    Serial.print(F(" q="));
+    Serial.print(taskCount);
+    Serial.print(F(" withdraw="));
+    Serial.print(withdrawJob.active ? F("1") : F("0"));
+    Serial.print(F(" pollFail="));
+    Serial.println(commandPollFailures);
+  }
   if (STATUS_VERBOSE_LOG && (nowMs - lastStatusPrintMs >= STATUS_PRINT_MS)) {
     lastStatusPrintMs = nowMs;
     printStatus();

@@ -12,43 +12,28 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [rememberMe, setRememberMe] = useState(false)
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     const normalizedUsername = username.trim().toLowerCase()
-    
-    if (userType === 'parent') {
-      // Verify parent account exists
-      const parentAccount = localStorage.getItem('cash_parent_account')
-      if (!parentAccount) {
-        alert('❌ No parent account found. Please create an account first!')
-        router.push('/create-account')
-        return
-      }
-      
-      // Verify credentials
-      const parent = JSON.parse(parentAccount)
-      if ((parent.username ?? '').toLowerCase() !== normalizedUsername || parent.password !== password) {
-        alert('❌ Incorrect username or password!')
-        return
-      }
-    } else if (userType === 'kid') {
-      // Verify the kid account exists
-      const validKidAccounts: string[] = JSON.parse(localStorage.getItem('cash_valid_kid_accounts') || '[]')
-      const matchedUsername = validKidAccounts.find((account) => account.toLowerCase() === normalizedUsername)
-      if (!matchedUsername) {
-        alert('❌ This kid account does not exist. Ask your parent to create one first!')
-        return
-      }
-      
-      // Verify password
-      const storedPassword = localStorage.getItem(`cash_kid_pwd_${matchedUsername}`)
-      if (storedPassword !== password) {
-        alert('❌ Incorrect password!')
-        return
-      }
 
-      sessionStorage.setItem('cash_username', matchedUsername)
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: normalizedUsername,
+        password,
+        role: userType,
+      }),
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Login failed' }))
+      alert(`❌ ${data.error ?? 'Login failed'}`)
+      return
     }
+
+    const data = await res.json() as { account: { username: string } }
+    sessionStorage.setItem('cash_username', data.account.username)
     
     // Login successful
     sessionStorage.setItem('cash_role', userType)

@@ -1,6 +1,41 @@
 export const dynamic = 'force-dynamic'
 import { NextResponse } from 'next/server'
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
+import {
+  applyDepositToInventory,
+  buildBreakdownFromField,
+  normalizeCashAmount,
+} from '@/lib/machine-cash'
+
+async function findOrCreateAccountByUsername(
+  tx: Prisma.TransactionClient,
+  username: string,
+  role: string,
+  autoCreate: boolean
+) {
+  const normalized = username.trim().toLowerCase()
+  if (!normalized) {
+    return null
+  }
+
+  const existing = await tx.account.findUnique({ where: { username: normalized } })
+  if (existing) {
+    return existing
+  }
+
+  if (!autoCreate) {
+    return null
+  }
+
+  return tx.account.create({
+    data: {
+      username: normalized,
+      passwordHash: 'legacy-local-account',
+      role: role === 'parent' ? 'parent' : 'kid',
+    },
+  })
+}
 
 // Producer endpoint: hardware bridge posts deposits here.
 export async function POST(request: Request) {
@@ -16,12 +51,67 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
   }
 
+  const payload = body as Record<string, unknown>
+  const username = typeof payload.account === 'string' ? payload.account.trim().toLowerCase() : ''
+  const role = typeof payload.role === 'string' ? payload.role.trim().toLowerCase() : 'kid'
+  const source = typeof payload.source === 'string' ? payload.source.trim().toLowerCase() : ''
+  const note = typeof payload.note === 'string' ? payload.note.trim() : 'Hardware deposit'
+  const autoCreate = payload.autoCreate !== false
+
   try {
-    const item = await prisma.depositQueue.create({
-      data: { amount: Math.round(amount * 100) / 100 },
+    const normalizedAmount = Math.round(amount * 100) / 100
+
+    const result = await prisma.$transaction(async (tx) => {
+      const item = await tx.depositQueue.create({
+        data: { amount: normalizedAmount },
+      })
+
+      const inventoryField = await applyDepositToInventory(tx, normalizeCashAmount(normalizedAmount), source)
+      const breakdown = buildBreakdownFromField(inventoryField)
+
+      let accountBalance: number | null = null
+      if (username) {
+        const account = await findOrCreateAccountByUsername(tx, username, role, autoCreate)
+        if (!account) {
+          throw new Error('ACCOUNT_NOT_FOUND')
+        }
+
+        const updated = await tx.account.update({
+          where: { id: account.id },
+          data: { balance: { increment: normalizedAmount } },
+        })
+        accountBalance = updated.balance
+
+        await tx.transaction.create({
+          data: {
+            accountId: account.id,
+            amount: normalizedAmount,
+            note,
+            kind: 'hardware-deposit',
+            when: 'Just now',
+          },
+        })
+      }
+
+      await tx.machineCashEvent.create({
+        data: {
+          direction: 'IN',
+          amount: normalizedAmount,
+          accountUsername: username || null,
+          note,
+          source: source || 'hardware',
+          breakdown: breakdown ?? undefined,
+        },
+      })
+
+      return { item, inventoryField, accountBalance }
     })
-    return NextResponse.json({ ok: true, item })
+
+    return NextResponse.json({ ok: true, ...result })
   } catch (e) {
+    if (e instanceof Error && e.message === 'ACCOUNT_NOT_FOUND') {
+      return NextResponse.json({ error: 'Account not found' }, { status: 404 })
+    }
     const detail = JSON.stringify(e, Object.getOwnPropertyNames(e as object))
     return NextResponse.json({ error: 'DB error', detail }, { status: 500 })
   }
