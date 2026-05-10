@@ -107,19 +107,41 @@ function formatSignedPHP(value: number): string {
   return `${sign}${formatPHP(Math.abs(value))}`
 }
 
-async function persistAccountDeposit(username: string, amount: number, role: Role, note: string) {
-  await fetch('/api/accounts/deposit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username,
-      amount,
-      role,
-      note,
-      source: 'dashboard',
-      autoCreate: true,
-    }),
-  })
+async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
+  let lastError = 'Failed to save deposit'
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const res = await fetch('/api/accounts/deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          amount,
+          role,
+          note,
+          source: 'dashboard',
+          autoCreate: true,
+        }),
+      })
+
+      if (res.ok) {
+        const data = await res.json() as { balance?: number }
+        return { balance: typeof data.balance === 'number' ? data.balance : null }
+      }
+
+      const data = await res.json().catch(() => ({ error: 'Failed to save deposit' })) as { error?: string }
+      lastError = data.error ?? 'Failed to save deposit'
+    } catch {
+      lastError = 'Network error while saving deposit'
+    }
+
+    if (attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt))
+    }
+  }
+
+  throw new Error(lastError)
 }
 
 async function fetchAccountBalance(username: string): Promise<number | null> {
@@ -540,65 +562,101 @@ export default function DashboardPage() {
   useEffect(() => {
     if (depositCountdown !== 0) return
 
-    if (kidDepositModalOpen) {
-      if (pendingDepositReceived > 0) {
-        const credited = Math.round(pendingDepositReceived * 100) / 100
-        setBalance((prev) => Math.round((prev + credited) * 100) / 100)
-        void persistAccountDeposit(kidName, credited, 'kid', 'Hardware deposit')
-        setHistory((prev) => [
-          {
-            id: Date.now(),
-            child: kidName,
-            amount: credited,
-            note: 'Hardware deposit',
-            when: 'Just now',
-            kind: 'hardware',
-          },
-          ...prev,
-        ])
-        setDepositToast(`+${formatPHP(credited)} deposited!`)
-        setTimeout(() => setDepositToast(null), 4000)
-      }
-      setPendingDepositReceived(0)
-      setKidDepositModalOpen(false)
-      if (kidName) {
-        void releaseDeviceLock(kidName)
-      }
-    } else if (pendingDepositKid) {
-      if (pendingDepositReceived > 0) {
-        const credited = Math.round(pendingDepositReceived * 100) / 100
-        if (pendingDepositKid === parentName) {
-          setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
-          void persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (self)')
-        } else {
-          setKidBalances((prev) => ({
-            ...prev,
-            [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
-          }))
-          void persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (parent confirmation)')
+    void (async () => {
+      if (kidDepositModalOpen) {
+        if (pendingDepositReceived > 0) {
+          const credited = Math.round(pendingDepositReceived * 100) / 100
+          try {
+            const saved = await persistAccountDeposit(kidName, credited, 'kid', 'Hardware deposit')
+            const latestBalance = saved.balance ?? await fetchAccountBalance(kidName)
+            if (latestBalance !== null) {
+              setBalance(latestBalance)
+              setKidBalances((prev) => ({ ...prev, [kidName]: latestBalance }))
+            } else {
+              setBalance((prev) => Math.round((prev + credited) * 100) / 100)
+            }
+
+            setHistory((prev) => [
+              {
+                id: Date.now(),
+                child: kidName,
+                amount: credited,
+                note: 'Hardware deposit',
+                when: 'Just now',
+                kind: 'hardware',
+              },
+              ...prev,
+            ])
+            setDepositToast(`+${formatPHP(credited)} deposited!`)
+            setTimeout(() => setDepositToast(null), 4000)
+            setPendingDepositError(null)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to save deposit'
+            setPendingDepositError(`Deposit detected but not saved yet: ${message}`)
+            setDepositCountdown(10)
+            return
+          }
         }
-        setHistory((prev) => [
-          {
-            id: Date.now(),
-            child: pendingDepositKid,
-            amount: credited,
-            note: 'Hardware deposit (parent confirmation)',
-            when: 'Just now',
-            kind: 'hardware',
-          },
-          ...prev,
-        ])
-        setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
-        setTimeout(() => setDepositToast(null), 4000)
+        setPendingDepositReceived(0)
+        setKidDepositModalOpen(false)
+        if (kidName) {
+          void releaseDeviceLock(kidName)
+        }
+      } else if (pendingDepositKid) {
+        if (pendingDepositReceived > 0) {
+          const credited = Math.round(pendingDepositReceived * 100) / 100
+          try {
+            if (pendingDepositKid === parentName) {
+              const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (self)')
+              const latestBalance = saved.balance ?? await fetchAccountBalance(parentName)
+              if (latestBalance !== null) {
+                setParentBalance(latestBalance)
+              } else {
+                setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
+              }
+            } else {
+              const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (parent confirmation)')
+              const latestBalance = saved.balance ?? await fetchAccountBalance(pendingDepositKid)
+              if (latestBalance !== null) {
+                setKidBalances((prev) => ({ ...prev, [pendingDepositKid]: latestBalance }))
+              } else {
+                setKidBalances((prev) => ({
+                  ...prev,
+                  [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
+                }))
+              }
+            }
+
+            setHistory((prev) => [
+              {
+                id: Date.now(),
+                child: pendingDepositKid,
+                amount: credited,
+                note: 'Hardware deposit (parent confirmation)',
+                when: 'Just now',
+                kind: 'hardware',
+              },
+              ...prev,
+            ])
+            setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
+            setTimeout(() => setDepositToast(null), 4000)
+            setPendingDepositError(null)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to save deposit'
+            setPendingDepositError(`Deposit detected but not saved yet: ${message}`)
+            setDepositCountdown(10)
+            return
+          }
+        }
+        const locker = parentName || pendingDepositKid
+        if (locker) {
+          void releaseDeviceLock(locker)
+        }
+        setPendingDepositKid(null)
+        setPendingDepositReceived(0)
+        setPendingDepositError(null)
       }
-      const locker = parentName || pendingDepositKid
-      if (locker) {
-        void releaseDeviceLock(locker)
-      }
-      setPendingDepositKid(null)
-      setPendingDepositReceived(0)
-      setPendingDepositError(null)
-    }
+    })()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depositCountdown])
 
@@ -891,14 +949,37 @@ export default function DashboardPage() {
     setDepositCountdown(30)
   }
 
-  const applyParentReceivedDeposit = () => {
+  const applyParentReceivedDeposit = async () => {
     if (!pendingDepositKid || pendingDepositReceived <= 0) return
 
     const credited = Math.round(pendingDepositReceived * 100) / 100
-    setKidBalances((prev) => ({
-      ...prev,
-      [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
-    }))
+    try {
+      if (pendingDepositKid === parentName) {
+        const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (manual confirmation)')
+        const latestBalance = saved.balance ?? await fetchAccountBalance(parentName)
+        if (latestBalance !== null) {
+          setParentBalance(latestBalance)
+        } else {
+          setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
+        }
+      } else {
+        const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (manual confirmation)')
+        const latestBalance = saved.balance ?? await fetchAccountBalance(pendingDepositKid)
+        if (latestBalance !== null) {
+          setKidBalances((prev) => ({ ...prev, [pendingDepositKid]: latestBalance }))
+        } else {
+          setKidBalances((prev) => ({
+            ...prev,
+            [pendingDepositKid]: Math.round(((prev[pendingDepositKid] ?? 0) + credited) * 100) / 100,
+          }))
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save deposit'
+      setPendingDepositError(`Deposit detected but not saved yet: ${message}`)
+      return
+    }
+
     setHistory((prev) => [
       {
         id: Date.now(),
@@ -910,6 +991,7 @@ export default function DashboardPage() {
       },
       ...prev,
     ])
+    setPendingDepositError(null)
     setDepositToast(`${formatPHP(credited)} deposited to ${pendingDepositKid}`)
     setTimeout(() => setDepositToast(null), 4000)
     cancelParentDepositFlow()
@@ -981,6 +1063,7 @@ export default function DashboardPage() {
                 } catch { /* keep existing ref */ }
                 await fetch('/api/deposit/clear', { method: 'POST' })
                 setPendingDepositReceived(0)
+                setPendingDepositError(null)
                 setDepositCountdown(30)
                 setKidDepositModalOpen(true)
               })()
@@ -2086,6 +2169,7 @@ export default function DashboardPage() {
               <div className="bg-green-50 rounded-xl p-4 space-y-2 font-inter text-gray-800">
                 <p>Collected so far: <span className="font-semibold text-green-700">{formatPHP(pendingDepositReceived)}</span></p>
                 <p>Current Balance: <span className="font-semibold">{formatPHP(balance)}</span></p>
+                {pendingDepositError && <p className="text-amber-700 text-sm">{pendingDepositError}</p>}
               </div>
 
               <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
@@ -2097,6 +2181,7 @@ export default function DashboardPage() {
                 type="button"
                 onClick={() => {
                   setPendingDepositReceived(0)
+                  setPendingDepositError(null)
                   setKidDepositModalOpen(false)
                   if (kidName) {
                     void releaseDeviceLock(kidName)
