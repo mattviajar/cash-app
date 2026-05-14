@@ -20,12 +20,19 @@ constexpr bool BILL_INPUT_ENABLED = true;
 constexpr bool COIN_INPUT_ENABLED = true;
 constexpr bool IR5_VERBOSE_LOG = false;
 
-// IR sensors are wired active-low.
+// IR sensors default to active-low.
 constexpr bool ACTIVE_LOW = true;
 // Coin/bill acceptor outputs are typically open-collector and pull LOW on pulse.
 constexpr bool PULSE_ACTIVE_LOW = true;
 constexpr unsigned long DETECT_HOLD_MS = 10;
-constexpr unsigned long IR5_DETECT_HOLD_MS = 140;
+constexpr unsigned long IR5_DETECT_HOLD_IDLE_MS = 90;
+constexpr unsigned long IR5_DETECT_HOLD_MOVING_MS = 25;
+constexpr unsigned long IR5_EDGE_DEBOUNCE_IDLE_MS = 25;
+constexpr unsigned long IR5_EDGE_DEBOUNCE_MOVING_MS = 8;
+constexpr unsigned long IR5_SLOT4_DEBOUNCE_IDLE_MS = 120;
+constexpr unsigned long IR5_SLOT4_DEBOUNCE_MOVING_MS = 40;
+constexpr unsigned long IR5_SLOT4_EXTRA_HOLD_MS = 120;
+constexpr bool IR5_RAW_EVENT_LOG = false;
 constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
 constexpr unsigned long DISPENSE_TIMEOUT_MS = 12000;
@@ -46,7 +53,7 @@ constexpr uint8_t M4_IR_PIN = 35;   // local IR for motor 4 (input-only, free GP
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
 // IR5_1 moved to GPIO34 to avoid conflict with BILL_PIN on GPIO32.
-constexpr uint8_t IR5_PINS[] = {34, 33, 25, 26, 4};
+constexpr uint8_t IR5_PINS[] = {34, 33, 25, 13, 26}; // IR5-4=GPIO13, IR5-5=GPIO26
 
 constexpr uint8_t SERVO_CHANNEL_COUNT = 7;
 constexpr uint16_t SERVO_PWM_MIN = 110;
@@ -59,21 +66,69 @@ constexpr uint8_t PCA9685_LED0_ON_L = 0x06;
 // PCA9685 channel assignment from your thesis hardware.
 constexpr uint8_t SPINNER_CHANNEL_MIN = 0;   // CH0..CH4 storage spinner servos
 constexpr uint8_t SPINNER_CHANNEL_MAX = 4;
+constexpr uint8_t STORAGE_SLOT_COUNT = 5;
 constexpr uint8_t ELEVATOR_LIFT_CHANNEL = 5; // CH5 elevator lift servo
 constexpr uint8_t ELEVATOR_OUT_CHANNEL = 6;  // CH6 elevator output spinner
 constexpr bool LIFT_DIRECTION_INVERTED = true;
 
 // 360 servo commands: 90=stop, >90 rotate one direction, <90 rotate opposite direction.
 constexpr uint8_t SERVO_STOP_CMD = 90;
-constexpr uint8_t SPINNER_RUN_CMD = 106;
+constexpr uint8_t SPINNER_RUN_CMD = 180;
 // Reverse direction to eject bills from storage during withdrawal (max speed).
 constexpr uint8_t SPINNER_WITHDRAW_CMD = 0;
-constexpr uint8_t ELEVATOR_LIFT_UP_CMD = 122;
+constexpr uint8_t STORAGE_FORWARD_CMD = SPINNER_RUN_CMD;
+constexpr uint8_t STORAGE_BACKWARD_CMD = SPINNER_WITHDRAW_CMD;
+
+uint8_t storageChannelMap[STORAGE_SLOT_COUNT] = {0, 1, 2, 3, 4};
+bool storageDirectionInverted[STORAGE_SLOT_COUNT] = {true, false, false, false, false};
+bool ir5ActiveLow[5] = {ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW};
+int8_t ir5PreferredSlot = 0;
+
+uint8_t storageChannelForSlot(uint8_t slot) {
+  if (slot >= STORAGE_SLOT_COUNT) {
+    return SPINNER_CHANNEL_MIN;
+  }
+  return SPINNER_CHANNEL_MIN + storageChannelMap[slot];
+}
+
+uint8_t storageCommandForSlot(uint8_t slot, uint8_t command) {
+  if (slot >= STORAGE_SLOT_COUNT) {
+    return command;
+  }
+  if (!storageDirectionInverted[slot]) {
+    return command;
+  }
+  if (command == STORAGE_FORWARD_CMD) {
+    return STORAGE_BACKWARD_CMD;
+  }
+  if (command == STORAGE_BACKWARD_CMD) {
+    return STORAGE_FORWARD_CMD;
+  }
+  return command;
+}
+constexpr uint8_t ELEVATOR_LIFT_UP_CMD = 110;    // Slowed from 122 for IR sensor detection time
 constexpr uint8_t ELEVATOR_LIFT_HOLD_CMD = 92;
+// Individual hold speeds for each slot (tuned for each floor position).
+// Values >90 produce upward torque (with LIFT_DIRECTION_INVERTED=true) and are
+// needed at every floor except the bottom to counteract gravity on the heavy
+// carriage. Tune up/down in small steps if a floor still drifts.
+constexpr uint8_t ELEVATOR_HOLD_IR5_1_CMD = 92;   // IR5-1 (top) - mild upward bias
+constexpr uint8_t ELEVATOR_HOLD_IR5_2_CMD = 90;  // IR5-2 - upward bias against gravity (110 was too weak; raise if it still drifts down, lower if it creeps up)
+constexpr uint8_t ELEVATOR_HOLD_IR5_3_CMD = 90;   // IR5-3 - servo stop, gearbox holds
+constexpr uint8_t ELEVATOR_HOLD_IR5_4_CMD = 90;   // IR5-4 - servo stop, gearbox holds
+constexpr uint8_t ELEVATOR_HOLD_IR5_5_CMD = 90;   // IR5-5 (bottom) - rests on frame, power cut
 constexpr uint8_t ELEVATOR_LIFT_CATCH_SLOW_UP_CMD = 110;
-constexpr uint8_t ELEVATOR_LIFT_RECOVER_CMD = 114;
-constexpr uint8_t ELEVATOR_LIFT_DOWN_CMD = 60;
-constexpr uint8_t ELEVATOR_OUT_PUSH_CMD = 10;
+constexpr uint8_t ELEVATOR_LIFT_RECOVER_CMD = 115;  // (legacy, no longer used by park) Park used to burst at this command; replaced by continuous creep.
+// Park-recovery CREEP commands: very gentle, just outside the servo deadband
+// so the motor turns slowly. We can stop the instant the target IR's raw
+// reading triggers — no momentum overshoot.
+constexpr uint8_t ELEVATOR_PARK_CREEP_UP_CMD = 95;     // logical 95  → physical 85 (very weak UP)
+constexpr uint8_t ELEVATOR_PARK_CREEP_DOWN_CMD = 85;   // logical 85  → physical 95 (very weak DOWN)
+constexpr uint8_t ELEVATOR_LIFT_DOWN_CMD = 70;   // Slowed from 60 for IR sensor detection time
+// CH6 (output spinner) push direction. Earlier hardware test confirmed
+// `SERVO 6 180` is the FORWARD/push direction. Stop is 90; symmetric push
+// magnitude on the forward side is therefore (90 + (90-10)) = 170.
+constexpr uint8_t ELEVATOR_OUT_PUSH_CMD = 170;
 
 constexpr unsigned long ELEVATOR_NUDGE_MS = 180;
 constexpr unsigned long ELEVATOR_SETTLE_MS = 180;
@@ -81,17 +136,18 @@ constexpr unsigned long ELEVATOR_OUT_PULSE_MS = 5000;
 constexpr unsigned long SPINNER_PULSE_MS = 300;
 constexpr unsigned long ELEVATOR_RETURN_MS = 900;
 constexpr unsigned long ELEVATOR_ROUTE_TIMEOUT_MS = 9000;
-constexpr unsigned long BILL_ROUTE_SETTLE_MS = 3000; // wait after bill detected before routing
-constexpr unsigned long ELEVATOR_TO_IR5_1_TIMEOUT_MS = 9000;
-constexpr unsigned long ELEVATOR_SLOT_MOVE_TIMEOUT_MS = 12000;
+constexpr unsigned long BILL_ROUTE_SETTLE_MS = 60000; // wait after bill detected before routing (1 minute)
+constexpr unsigned long STORAGE_TEST_SPIN_MS = 1500;
+constexpr unsigned long ELEVATOR_TO_IR5_1_TIMEOUT_MS = 25000;
+constexpr unsigned long ELEVATOR_SLOT_MOVE_TIMEOUT_MS = 25000;
 constexpr unsigned long ELEVATOR_SLOT_STOP_MS = 450;
 constexpr unsigned long ELEVATOR_CATCH_SETTLE_MS = 120;
 constexpr unsigned long ELEVATOR_CATCH_SLOW_UP_MS = 1300;
-constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 220;
-constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 350;
+constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 180;
+constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 150;
 constexpr unsigned long ELEVATOR_LIFT_DIRECTION_TEST_MS = 2000;
 // Withdrawal timing
-constexpr unsigned long WITHDRAW_SPIN_MS = 2500;           // time to eject one bill
+constexpr unsigned long WITHDRAW_SPIN_MS = 2000;           // time to eject one bill
 constexpr unsigned long WITHDRAW_INTER_BILL_GAP_MS = 600;  // pause between bills
 constexpr unsigned long WITHDRAW_TOTAL_TIMEOUT_MS = 120000; // 2-min safety timeout
 constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000;        // 15-min motor safety cap
@@ -153,8 +209,9 @@ constexpr char DEVICE_STATUS_API_URL[] = "https://cash-app-production-458e.up.ra
 constexpr unsigned long COMMAND_POLL_MS = 10000;
 constexpr unsigned long COMMAND_POLL_RETRY_MS = 15000;
 constexpr uint16_t COMMAND_HTTP_TIMEOUT_MS = 5000;
-constexpr bool COMMAND_POLL_VERBOSE = true;
+constexpr bool COMMAND_POLL_VERBOSE = false;
 constexpr unsigned long LOOP_HEARTBEAT_MS = 3000;
+constexpr bool LOOP_HEARTBEAT_VERBOSE = false;
 constexpr unsigned long COMMAND_SKIP_LOG_MS = 5000;
 
 struct MotorState {
@@ -269,11 +326,17 @@ bool elevatorParkRecovering = false;
 uint8_t elevatorParkSlot = 0;
 unsigned long elevatorParkRecoverStartedMs = 0;
 unsigned long elevatorParkRetryAfterMs = 0;
+// Most recent non-target IR slot seen since park began. -1 means none yet.
+// Used to infer recovery direction even after the drifted-to slot's stable
+// detection has timed out (so we don't blindly default to UP and runaway).
+int8_t elevatorParkLastDriftSlot = -1;
 uint8_t pendingBillSlots[8] = {0};
 uint8_t pendingBillCount = 0;
 unsigned long billRouteReadyAfterMs = 0;
 
-bool ir5LastState[5] = {false, false, false, false, false};
+bool ir5RawLastState[5] = {false, false, false, false, false};
+bool ir5StableState[5] = {false, false, false, false, false};
+unsigned long ir5RawChangedMs[5] = {0, 0, 0, 0, 0};
 unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
@@ -303,6 +366,11 @@ uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
   SERVO_STOP_CMD,
   SERVO_STOP_CMD,
 };
+
+// Add dwell timers for IR5 sensors
+unsigned long ir5DwellStartMs[5] = {0, 0, 0, 0, 0};
+bool ir5DwellActive[5] = {false, false, false, false, false};
+constexpr unsigned long IR5_DWELL_MS = 150;
 
 void stopElevatorPark();
 void startElevatorPark(uint8_t slot);
@@ -350,6 +418,70 @@ void pcaAllChannelsOff() {
 
 bool isDetected(int rawValue) {
   return ACTIVE_LOW ? (rawValue == LOW) : (rawValue == HIGH);
+}
+
+bool isIr5RawDetected(uint8_t slot) {
+  if (slot > 4) {
+    return false;
+  }
+  // Slot 3 (IR5-3) needs HIGH sensitivity: any hit out of 7 samples counts
+  // as detected so the elevator never overshoots while passing through.
+  if (slot == 2) {
+    for (uint8_t i = 0; i < 7; ++i) {
+      const int s = digitalRead(IR5_PINS[slot]);
+      const bool det = ir5ActiveLow[slot] ? (s == LOW) : (s == HIGH);
+      if (det) return true;
+      delayMicroseconds(150);
+    }
+    return false;
+  }
+  // Slots 4 and 5 (IR5-4 / IR5-5) are electrically noisy: take a quick
+  // majority vote across 7 samples spaced 150us apart (~1ms total). Wins
+  // fast detection and rejects sub-millisecond chatter without long
+  // debounce delay.
+  if (slot == 3 || slot == 4) {
+    uint8_t hits = 0;
+    for (uint8_t i = 0; i < 7; ++i) {
+      const int s = digitalRead(IR5_PINS[slot]);
+      const bool det = ir5ActiveLow[slot] ? (s == LOW) : (s == HIGH);
+      if (det) ++hits;
+      delayMicroseconds(150);
+    }
+    return hits >= 4; // majority of 7
+  }
+  const int raw = digitalRead(IR5_PINS[slot]);
+  return ir5ActiveLow[slot] ? (raw == LOW) : (raw == HIGH);
+}
+
+int8_t currentIr5FaceSlot() {
+  bool active[5] = {false, false, false, false, false};
+  uint8_t activeCount = 0;
+  int8_t firstActive = -1;
+
+  for (uint8_t slot = 0; slot < 5; ++slot) {
+    active[slot] = ir5StableState[slot];
+    if (active[slot]) {
+      if (firstActive < 0) {
+        firstActive = static_cast<int8_t>(slot);
+      }
+      ++activeCount;
+    }
+  }
+
+  if (activeCount == 0) {
+    return -1;
+  }
+  if (activeCount == 1) {
+    return firstActive;
+  }
+
+  // If multiple sensors are active, keep the previously valid slot if still active.
+  if (ir5PreferredSlot >= 0 && ir5PreferredSlot < 5 && active[ir5PreferredSlot]) {
+    return ir5PreferredSlot;
+  }
+
+  // Ambiguous (multiple active with no trusted prior slot): treat as no valid face detection.
+  return -1;
 }
 
 bool isM4IrDetected() {
@@ -788,7 +920,11 @@ bool isIr5Detected(uint8_t slot) {
   if (slot > 4) {
     return false;
   }
-  return isDetected(digitalRead(IR5_PINS[slot]));
+  const int8_t faceSlot = currentIr5FaceSlot();
+  if (faceSlot >= 0) {
+    ir5PreferredSlot = faceSlot;
+  }
+  return faceSlot == static_cast<int8_t>(slot);
 }
 
 int8_t currentIr5SlotDetected() {
@@ -841,6 +977,23 @@ void serviceLiftHardLimits() {
     return;
   }
 
+  // SAFETY: if the carriage has reached the physical bottom (IR5-5) and the
+  // park system is trying to hold it at any other floor, it means the carriage
+  // fell and the hold is too weak (or the polarity is wrong). In either case
+  // continuing to drive the motor will only wind the string the wrong way
+  // around the spool. Cut all lift power immediately.
+  if (elevatorParkActive && elevatorParkSlot != 4 && isIr5Detected(4)) {
+    if (currentLiftCommand != SERVO_STOP_CMD) {
+      currentLiftCommand = SERVO_STOP_CMD;
+      pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
+      Serial.print(F("LIFT SAFETY: carriage hit bottom while parking at IR5-"));
+      Serial.print(elevatorParkSlot + 1);
+      Serial.println(F(" - power cut"));
+    }
+    stopElevatorPark();
+    return;
+  }
+
   const uint8_t safeCommand = clampLiftCommandToLimits(currentLiftCommand);
   if (safeCommand != currentLiftCommand) {
     currentLiftCommand = safeCommand;
@@ -854,17 +1007,27 @@ bool isIr5StableDetected(uint8_t slot, unsigned long nowMs) {
     return false;
   }
 
+  const bool liftMoving = (currentLiftCommand != SERVO_STOP_CMD);
+  unsigned long holdMs = liftMoving ? IR5_DETECT_HOLD_MOVING_MS : IR5_DETECT_HOLD_IDLE_MS;
+  if (slot == 3) {
+    holdMs += IR5_SLOT4_EXTRA_HOLD_MS;
+  }
+
   if (isIr5Detected(slot)) {
     if (ir5DetectStartedMs[slot] == 0) {
       ir5DetectStartedMs[slot] = nowMs;
       return false;
     }
-    return (nowMs - ir5DetectStartedMs[slot]) >= IR5_DETECT_HOLD_MS;
+    return (nowMs - ir5DetectStartedMs[slot]) >= holdMs;
   }
 
   ir5DetectStartedMs[slot] = 0;
   return false;
 }
+
+// Forward declaration: moveLiftDirectToSlot is defined later in this file but
+// is invoked from BillRoute helpers that appear earlier.
+bool moveLiftDirectToSlot(uint8_t slot);
 
 void startBillRouteIfPending() {
   // For bill input flow, always finish catch-to-IR5-1 first before routing.
@@ -875,36 +1038,40 @@ void startBillRouteIfPending() {
   if (billRouteReadyAfterMs > 0 && millis() < billRouteReadyAfterMs) {
     return;
   }
-
-  // Release park hold before route control takes over CH5.
-  if (elevatorParkActive) {
-    stopElevatorPark();
+  if (!motionArmed || !SERVOS_ENABLED) {
+    return;
   }
 
-  billRoute.active = true;
-  billRoute.stage = ROUTE_FIND_LEVEL;
-  billRoute.targetSlot = pendingBillSlots[0];
-  billRoute.startedMs = millis();
-  billRoute.stageStartedMs = billRoute.startedMs;
-  billRoute.liftRunning = true;
-
-  const int8_t currentSlot = currentIr5SlotDetected();
-  if (currentSlot >= 0) {
-    if (currentSlot < static_cast<int8_t>(billRoute.targetSlot)) {
-      setLiftCommand(ELEVATOR_LIFT_DOWN_CMD);
-    } else if (currentSlot > static_cast<int8_t>(billRoute.targetSlot)) {
-      setLiftCommand(ELEVATOR_LIFT_UP_CMD);
-    } else {
-      setLiftCommand(ELEVATOR_LIFT_HOLD_CMD);
-      billRoute.liftRunning = false;
-    }
-  } else {
-    // Fallback if no IR5 is currently active.
-    setLiftCommand(ELEVATOR_LIFT_UP_CMD);
-  }
+  const uint8_t targetSlot = pendingBillSlots[0];
 
   Serial.print(F("BILL ROUTE START slot="));
-  Serial.println(billRoute.targetSlot + 1);
+  Serial.println(targetSlot + 1);
+
+  // Use the proven IR5 navigation: raw-IR arrival + park hold (cmd=90) + creep
+  // recovery. This is the same path used by the manual IR5-N command and
+  // replaces the old bang-bang lift logic that drifted at non-top floors.
+  stopElevatorPark();
+  if (!moveLiftDirectToSlot(targetSlot)) {
+    Serial.print(F("BILL ROUTE NAV FAIL slot="));
+    Serial.println(targetSlot + 1);
+    setLiftCommand(SERVO_STOP_CMD);
+    popBillSlot();
+    return;
+  }
+
+  // Carriage is now parked at target IR5 with hold cmd. Begin transfer-out:
+  // CH6 pushes bill into storage, destination slot motor assists feed.
+  billRoute.active = true;
+  billRoute.stage = ROUTE_TRANSFER_OUT;
+  billRoute.targetSlot = targetSlot;
+  billRoute.startedMs = millis();
+  billRoute.stageStartedMs = billRoute.startedMs;
+  billRoute.liftRunning = false;
+
+  setServoAngle(ELEVATOR_OUT_CHANNEL, ELEVATOR_OUT_PUSH_CMD);
+  setServoAngle(SPINNER_CHANNEL_MIN + targetSlot, SPINNER_RUN_CMD);
+  Serial.print(F("BILL ROUTE TRANSFER slot="));
+  Serial.println(targetSlot + 1);
 }
 
 void stopElevatorOutMotor() {
@@ -923,7 +1090,108 @@ void stopStorageMotor(uint8_t slot) {
     return;
   }
   // Fully disable slot channel PWM to guarantee no residual spin.
-  pcaSetPwm(SPINNER_CHANNEL_MIN + slot, 0, 0);
+  pcaSetPwm(storageChannelForSlot(slot), 0, 0);
+}
+
+void spinStorageMotor(uint8_t slot, uint8_t command) {
+  if (!SERVOS_ENABLED) {
+    Serial.println(F("ERR servos-disabled"));
+    return;
+  }
+  if (!motionArmed) {
+    Serial.println(F("ERR motion-disarmed"));
+    return;
+  }
+  if (slot > 4) {
+    Serial.println(F("ERR storage slot 1..5"));
+    return;
+  }
+
+  const uint8_t mappedCommand = storageCommandForSlot(slot, command);
+  setServoAngle(storageChannelForSlot(slot), mappedCommand);
+  Serial.print(F("OK STORAGE slot="));
+  Serial.print(slot + 1);
+  Serial.print(F(" cmd="));
+  Serial.print(mappedCommand);
+  Serial.print(F(" dir="));
+  if (mappedCommand == SPINNER_RUN_CMD) {
+    Serial.println(F("FORWARD"));
+  } else if (mappedCommand == SPINNER_WITHDRAW_CMD) {
+    Serial.println(F("BACKWARD"));
+  } else {
+    Serial.println(F("CUSTOM"));
+  }
+}
+
+void spinAllStorageMotors(uint8_t command) {
+  if (!SERVOS_ENABLED) {
+    Serial.println(F("ERR servos-disabled"));
+    return;
+  }
+  if (!motionArmed) {
+    Serial.println(F("ERR motion-disarmed"));
+    return;
+  }
+
+  for (uint8_t slot = 0; slot < 5; ++slot) {
+    setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, command));
+  }
+
+  Serial.print(F("OK STORAGE all cmd="));
+  Serial.print(command);
+  Serial.print(F(" dir="));
+  if (command == SPINNER_RUN_CMD) {
+    Serial.println(F("FORWARD"));
+  } else if (command == SPINNER_WITHDRAW_CMD) {
+    Serial.println(F("BACKWARD"));
+  } else {
+    Serial.println(F("CUSTOM"));
+  }
+}
+
+void runStorageTest(uint8_t slot) {
+  if (!SERVOS_ENABLED) {
+    Serial.println(F("ERR servos-disabled"));
+    return;
+  }
+  if (slot > 4) {
+    Serial.println(F("ERR storage slot 1..5"));
+    return;
+  }
+  if (!motionArmed) {
+    motionArmed = true;
+    pcaAllChannelsOff();
+    Serial.println(F("OK ARMED (STORAGETEST)"));
+  }
+
+  Serial.print(F("STORAGETEST slot="));
+  Serial.print(slot + 1);
+  Serial.println(F(" FORWARD"));
+  setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_RUN_CMD));
+  delay(STORAGE_TEST_SPIN_MS);
+
+  Serial.print(F("STORAGETEST slot="));
+  Serial.print(slot + 1);
+  Serial.println(F(" BACKWARD"));
+  setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_WITHDRAW_CMD));
+  delay(STORAGE_TEST_SPIN_MS);
+
+  stopStorageMotor(slot);
+  Serial.print(F("STORAGETEST slot="));
+  Serial.print(slot + 1);
+  Serial.println(F(" STOP"));
+}
+
+void printStorageConfig() {
+  Serial.println(F("STORAGE CONFIG:"));
+  for (uint8_t slot = 0; slot < STORAGE_SLOT_COUNT; ++slot) {
+    Serial.print(F("  slot="));
+    Serial.print(slot + 1);
+    Serial.print(F(" channel="));
+    Serial.print(storageChannelMap[slot]);
+    Serial.print(F(" inverted="));
+    Serial.println(storageDirectionInverted[slot] ? F("1") : F("0"));
+  }
 }
 
 void finishBillRoute(const __FlashStringHelper* result) {
@@ -948,23 +1216,14 @@ void serviceBillRoute() {
   }
 
   switch (billRoute.stage) {
-    case ROUTE_FIND_LEVEL: {
-      if (isIr5StableDetected(billRoute.targetSlot, nowMs)) {
-        setLiftCommand(ELEVATOR_LIFT_HOLD_CMD);
-        billRoute.liftRunning = false;
-        billRoute.stage = ROUTE_TRANSFER_OUT;
-        billRoute.stageStartedMs = nowMs;
-        // Start CH6 only after elevator reaches the target IR location.
-        setServoAngle(ELEVATOR_OUT_CHANNEL, ELEVATOR_OUT_PUSH_CMD);
-        // Assist feed into storage with the destination slot motor.
-        setServoAngle(SPINNER_CHANNEL_MIN + billRoute.targetSlot, SPINNER_RUN_CMD);
-        break;
-      }
-      break;
-    }
-
-    case ROUTE_NUDGE_ABOVE: {
-      // Unused in current flow; retained for compatibility.
+    case ROUTE_FIND_LEVEL:
+    case ROUTE_NUDGE_ABOVE:
+    case ROUTE_SPINNER_PULSE:
+    case ROUTE_RETURN_HOME: {
+      // These legacy stages are no longer used: startBillRouteIfPending now
+      // performs the to-target nav synchronously via moveLiftDirectToSlot,
+      // and the return-home leg is handled below at the end of TRANSFER_OUT.
+      // If we ever land here, treat it as a no-op skip to TRANSFER_OUT.
       billRoute.stage = ROUTE_TRANSFER_OUT;
       billRoute.stageStartedMs = nowMs;
       break;
@@ -974,27 +1233,16 @@ void serviceBillRoute() {
       if (nowMs - billRoute.stageStartedMs >= ELEVATOR_OUT_PULSE_MS) {
         stopElevatorOutMotor();
         stopStorageMotor(billRoute.targetSlot);
-        billRoute.stage = ROUTE_RETURN_HOME;
-        billRoute.stageStartedMs = nowMs;
-        // After transfer, always home back to IR5-1 before waiting for next bill.
-        setLiftCommand(ELEVATOR_LIFT_UP_CMD);
-      }
-      break;
-    }
 
-    case ROUTE_SPINNER_PULSE: {
-      // Unused in current flow; retained for compatibility.
-      billRoute.stage = ROUTE_RETURN_HOME;
-      billRoute.stageStartedMs = nowMs;
-      setLiftCommand(ELEVATOR_LIFT_DOWN_CMD);
-      break;
-    }
-
-    case ROUTE_RETURN_HOME: {
-      if (isIr5StableDetected(0, nowMs)) {
-        setLiftCommand(SERVO_STOP_CMD);
-        startElevatorPark(0);
-        finishBillRoute(F("DONE"));
+        // Return home using the proven IR5 navigation (raw arrival + park
+        // hold cmd=90 + creep recovery), same path the manual IR5-1 uses.
+        Serial.println(F("BILL ROUTE RETURN_HOME"));
+        stopElevatorPark();
+        if (moveLiftDirectToSlot(0)) {
+          finishBillRoute(F("DONE"));
+        } else {
+          finishBillRoute(F("RETURN_FAIL"));
+        }
       }
       break;
     }
@@ -1113,9 +1361,16 @@ void printHelp() {
   Serial.println(F("  PULSEDEBUG"));
   Serial.println(F("  DIAGBILL"));
   Serial.println(F("  DIAGCOIN"));
+  Serial.println(F("  IR5POL <slot1to5> <LOW|HIGH|0|1>"));
   Serial.println(F("  M4IR (print raw + baseline + detected)"));
   Serial.println(F("  M4COIL a b c d   (raw 0/1 to IN1..IN4)"));
   Serial.println(F("  M4PINMAP p0 p1 p2 p3 (remap step cols 0-3 to IN1..IN4)"));
+  Serial.println(F("  STORAGE <slot1to5|ALL> <FORWARD|BACKWARD|STOP|cmd0to180>"));
+  Serial.println(F("  STORAGESTOP <slot1to5|ALL>"));
+  Serial.println(F("  STORAGETEST <slot1to5>"));
+  Serial.println(F("  STORAGECONF"));
+  Serial.println(F("  STORAGEMAP <slot1to5> <channel0to4>"));
+  Serial.println(F("  STORAGEINV <slot1to5> <0|1>"));
   Serial.println(F("  SERVO <channel> <angle>"));
   Serial.println(F("  HOME"));
   Serial.println(F("  STOP"));
@@ -1192,11 +1447,20 @@ void serviceInputDiag() {
 }
 
 uint8_t getElevatorHoldCommand(uint8_t slot) {
-  // No hold speed needed at IR5-4 and IR5-5 (bottom slots)
-  if (slot == 3 || slot == 4) {
-    return SERVO_STOP_CMD;  // 0 hold (full stop)
+  switch (slot) {
+    case 0:
+      return ELEVATOR_HOLD_IR5_1_CMD;  // IR5-1 (top floor)
+    case 1:
+      return ELEVATOR_HOLD_IR5_2_CMD;  // IR5-2 (floor 2)
+    case 2:
+      return ELEVATOR_HOLD_IR5_3_CMD;  // IR5-3 (floor 3)
+    case 3:
+      return ELEVATOR_HOLD_IR5_4_CMD;  // IR5-4 (floor 4)
+    case 4:
+      return ELEVATOR_HOLD_IR5_5_CMD;  // IR5-5 (bottom floor)
+    default:
+      return SERVO_STOP_CMD;
   }
-  return ELEVATOR_LIFT_HOLD_CMD;  // Normal hold for IR5-1, IR5-2, IR5-3
 }
 
 int8_t currentIr5Slot() {
@@ -1208,14 +1472,39 @@ int8_t currentIr5Slot() {
   return -1;
 }
 
-bool validateLiftDirection(uint8_t testCommand) {
+bool validateLiftDirection(uint8_t testCommand, uint8_t targetSlot) {
   if (testCommand == SERVO_STOP_CMD) {
     return true;  // Stop commands don't need validation
   }
 
   const int8_t positionBefore = currentIr5Slot();
+  
+  // Don't test if already at hard limits (IR5-1 at slot 0 or IR5-5 at slot 4)
+  // These limits are enforced by clampLiftCommandToLimits anyway
+  if (positionBefore == 0 || positionBefore == 4) {
+    return true;  // Already at a limit, hardware limits will prevent invalid moves
+  }
+
+  // If we're between sensors there is no reliable way to pre-measure direction
+  // (the 3s test would compare -1 vs -1). Trust the caller and let
+  // moveLiftToIr5Slot's own timeout / closed-loop correction catch real faults.
+  if (positionBefore < 0) {
+    return true;
+  }
+
+  // Test if within 1 slot of target (IR5-3 high sensitivity won't cause false failures)
+  if (positionBefore >= 0 && targetSlot >= 0 && targetSlot <= 4) {
+    int8_t distance = positionBefore > static_cast<int8_t>(targetSlot) 
+                      ? (positionBefore - static_cast<int8_t>(targetSlot))
+                      : (static_cast<int8_t>(targetSlot) - positionBefore);
+    if (distance <= 1) {
+      return true;  // Already very close to target, safe to move
+    }
+  }
+  
+  // Direction test for general movement between distant slots (extended for slower speed)
   setLiftCommand(testCommand);
-  delay(ELEVATOR_LIFT_DIRECTION_TEST_MS);
+  delay(3000);  // Increased from ELEVATOR_LIFT_DIRECTION_TEST_MS for slower speeds
   const int8_t positionAfter = currentIr5Slot();
   setLiftCommand(SERVO_STOP_CMD);
 
@@ -1233,30 +1522,73 @@ bool validateLiftDirection(uint8_t testCommand) {
     return true;  // Moving DOWN succeeded
   }
 
-  if (positionBefore >= 0 && positionBefore == positionAfter) {
-    Serial.println(F("WARN lift direction test: already at limit (no position change)"));
-  } else if (positionBefore >= 0) {
-    Serial.print(F("WARN lift direction test: moved opposite direction ("));
-    Serial.print(positionBefore);
-    Serial.print(F("→"));
-    Serial.print(positionAfter);
-    Serial.println(F(")"));
+  if (positionBefore < 0 && positionAfter >= 0) {
+    return true;  // Detected a slot when previously undetected
   }
-  return false;  // Direction blocked or reversed
+
+  Serial.print(F("WARN lift direction test: no movement ("));
+  Serial.print(positionBefore);
+  Serial.print(F("→"));
+  Serial.print(positionAfter);
+  Serial.println(F(")"));
+  return false;  // Direction blocked or no movement detected
 }
 
 bool moveLiftToIr5Slot(uint8_t slot, uint8_t moveCommand, unsigned long timeoutMs) {
+  // Send initial movement command immediately so the lift starts moving even if
+  // the carriage is currently between IR sensors.
   setLiftCommand(moveCommand);
   const unsigned long startMs = millis();
+  uint8_t activeCommand = moveCommand;
+
+  Serial.print(F("MOVE LOOP target=IR5-"));
+  Serial.print(slot + 1);
+  Serial.print(F(" initialCmd="));
+  Serial.println(moveCommand);
 
   while (millis() - startMs < timeoutMs) {
-    const unsigned long nowMs = millis();
-    if (isIr5StableDetected(slot, nowMs)) {
+    // ARRIVAL: raw read for fast catch (carriage falls past beam in <150ms,
+    // so the dwell-debounced ir5StableState would miss it entirely).
+    if (isIr5RawDetected(slot)) {
+      setLiftCommand(getElevatorHoldCommand(slot));
+      Serial.print(F("MOVE LOOP arrived IR5-"));
+      Serial.print(slot + 1);
+      Serial.print(F(" elapsedMs="));
+      Serial.println(millis() - startMs);
       return true;
+    }
+
+    // OVERSHOOT: use dwell-debounced stable state. The raw IR5-3 read uses a
+    // hyper-sensitive any-of-7-samples pattern that fires on noise even when
+    // the carriage is far away, which would cause spurious direction flips
+    // (oscillation). The stable state filters those out.
+    int8_t overshootSlot = -1;
+    for (uint8_t i = 0; i < 5; ++i) {
+      if (i != slot && ir5StableState[i]) {
+        overshootSlot = static_cast<int8_t>(i);
+        break;
+      }
+    }
+    if (overshootSlot >= 0) {
+      // IR5-1 = slot 0 (top), IR5-5 = slot 4 (bottom). Slot index INCREASES
+      // going down, so a hit at slot > target means we are BELOW target.
+      uint8_t desiredCommand = (overshootSlot > static_cast<int8_t>(slot))
+                                   ? ELEVATOR_LIFT_UP_CMD
+                                   : ELEVATOR_LIFT_DOWN_CMD;
+      if (desiredCommand != activeCommand) {
+        setLiftCommand(desiredCommand);
+        activeCommand = desiredCommand;
+        Serial.print(F("MOVE LOOP correction at IR5-"));
+        Serial.print(overshootSlot + 1);
+        Serial.print(F(" newCmd="));
+        Serial.println(desiredCommand);
+      }
     }
     delay(5);
   }
-
+  setLiftCommand(SERVO_STOP_CMD);
+  Serial.print(F("MOVE LOOP timeout target=IR5-"));
+  Serial.println(slot + 1);
   return false;
 }
 
@@ -1284,7 +1616,7 @@ bool moveLiftDirectToSlot(uint8_t slot) {
   // Pre-move direction validation: test for 2 seconds to confirm direction is valid
   Serial.print(F("MOVE IR5-"));
   Serial.println(slot + 1);
-  if (!validateLiftDirection(moveCommand)) {
+  if (!validateLiftDirection(moveCommand, slot)) {
     Serial.print(F("ERR IR5-"));
     Serial.print(slot + 1);
     Serial.println(F(" direction invalid (at limit)"));
@@ -1298,6 +1630,11 @@ bool moveLiftDirectToSlot(uint8_t slot) {
     Serial.println(F(" timeout"));
     return false;
   }
+
+  // No post-arrival nudge: the raw IR detection in moveLiftToIr5Slot already
+  // catches the carriage the instant the beam breaks, and an extra upward
+  // nudge would push the carriage past the target before the park hold takes
+  // over (causing the recovery loop to keep climbing toward IR5-1).
 
   startElevatorPark(slot);
   Serial.print(F("OK IR5-"));
@@ -1445,12 +1782,24 @@ void startElevatorPark(uint8_t slot) {
   elevatorParkSlot = slot;
   elevatorParkRecoverStartedMs = 0;
   elevatorParkRetryAfterMs = 0;
-    if (slot == 3 || slot == 4) {
-      currentLiftCommand = SERVO_STOP_CMD;
-      pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);  // Fully cut power at IR5-4 and IR5-5
-    } else {
-      setLiftCommand(getElevatorHoldCommand(slot));
+  elevatorParkLastDriftSlot = -1;
+  // Clear stale stable-state on OTHER slots so a previous sequence's stable
+  // detection (e.g. boot LIFTTO1 leaving IR5-1 stable) cannot trigger a
+  // bogus recovery burst the instant we start parking at this slot.
+  for (uint8_t i = 0; i < 5; ++i) {
+    if (i != slot) {
+      ir5StableState[i] = false;
+      ir5DetectStartedMs[i] = 0;
     }
+  }
+  if (slot == 4) {
+    // IR5-5 is the physical bottom: rests on the frame, no power needed.
+    currentLiftCommand = SERVO_STOP_CMD;
+    pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
+  } else {
+    // All other floors: actively hold against gravity.
+    setLiftCommand(getElevatorHoldCommand(slot));
+  }
 }
 
 void serviceElevatorPark() {
@@ -1459,72 +1808,118 @@ void serviceElevatorPark() {
   }
 
   const unsigned long nowMs = millis();
-  if (elevatorParkSlot == 3 || elevatorParkSlot == 4) {
-    // Bottom slots: keep lift channel fully off and never run recovery bursts.
+
+  // IR5-5 (bottom): the carriage rests on the mechanical bottom. Keep the
+  // servo channel fully de-energised so it cannot fight the rest position.
+  if (elevatorParkSlot == 4) {
     elevatorParkRecovering = false;
     elevatorParkRecoverStartedMs = 0;
     elevatorParkRetryAfterMs = 0;
-    currentLiftCommand = SERVO_STOP_CMD;
-    pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
+    if (currentLiftCommand != SERVO_STOP_CMD) {
+      currentLiftCommand = SERVO_STOP_CMD;
+      pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
+    }
     return;
   }
 
+  const uint8_t holdCmd = getElevatorHoldCommand(elevatorParkSlot);
+
   if (isIr5StableDetected(elevatorParkSlot, nowMs)) {
+    // IR sensor confirms we are at the parked floor. Continuously reassert the
+    // per-slot hold value so the carriage cannot drift even if some other
+    // service routine briefly altered the lift command.
     if (elevatorParkRecovering) {
       elevatorParkRecovering = false;
       elevatorParkRecoverStartedMs = 0;
       elevatorParkRetryAfterMs = 0;
-        if (elevatorParkSlot == 3 || elevatorParkSlot == 4) {
-          currentLiftCommand = SERVO_STOP_CMD;
-          pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
-        } else {
-          setLiftCommand(getElevatorHoldCommand(elevatorParkSlot));
-        }
       Serial.print(F("ELEVATOR PARK RESTORED slot="));
       Serial.println(elevatorParkSlot + 1);
     }
+    // Back on target: forget previous drift direction so the next loss of
+    // beam picks direction fresh from current evidence.
+    elevatorParkLastDriftSlot = -1;
+    if (currentLiftCommand != holdCmd) {
+      setLiftCommand(holdCmd);
+    }
     return;
   }
+  // Update the remembered drift slot from any currently stable non-target IR
+  // BEFORE deciding what to do. This lets us infer direction later even when
+  // the carriage has overshot back into the gap between sensors.
+  for (uint8_t i = 0; i < 5; ++i) {
+    if (i != elevatorParkSlot && ir5StableState[i]) {
+      elevatorParkLastDriftSlot = static_cast<int8_t>(i);
+      break;
+    }
+  }
 
-  if (elevatorParkRecovering) {
-    if (nowMs - elevatorParkRecoverStartedMs >= ELEVATOR_PARK_RECOVER_BURST_MS) {
-      elevatorParkRecovering = false;
-      elevatorParkRecoverStartedMs = 0;
-      elevatorParkRetryAfterMs = nowMs + ELEVATOR_PARK_RETRY_HOLD_MS;
-        if (elevatorParkSlot == 3 || elevatorParkSlot == 4) {
-          currentLiftCommand = SERVO_STOP_CMD;
-          pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
-        } else {
-          setLiftCommand(getElevatorHoldCommand(elevatorParkSlot));
-        }
+  // Lost the IR sensor: creep gently back toward the target. We do NOT use
+  // momentum-style bursts because the heavy carriage flies past the beam in
+  // less than the dwell debounce window, causing the loop to keep climbing
+  // until it hits a hard limit. Instead, set a weak continuous command and
+  // re-evaluate every loop tick. The move stops the moment isIr5StableDetected
+  // succeeds at the top of this function on a future tick (which uses the raw
+  // reading via the existing dwell-detection layer).
+  bool recoverUpward = true;
+  int8_t evidenceSlot = -1;
+  for (uint8_t i = 0; i < 5; ++i) {
+    if (i != elevatorParkSlot && ir5StableState[i]) {
+      evidenceSlot = static_cast<int8_t>(i);
+      break;
+    }
+  }
+  if (evidenceSlot < 0) {
+    evidenceSlot = elevatorParkLastDriftSlot;
+  }
+  if (evidenceSlot >= 0) {
+    recoverUpward = (evidenceSlot > static_cast<int8_t>(elevatorParkSlot));
+  }
+
+  // Abort the creep the instant the target's raw IR triggers — don't wait
+  // for dwell debounce, the carriage can cross the beam in <150ms.
+  if (isIr5RawDetected(elevatorParkSlot)) {
+    elevatorParkRecovering = false;
+    if (currentLiftCommand != holdCmd) {
+      setLiftCommand(holdCmd);
     }
     return;
   }
 
-  if (nowMs < elevatorParkRetryAfterMs) {
-    return;
+  const uint8_t creepCmd = recoverUpward
+      ? ELEVATOR_PARK_CREEP_UP_CMD
+      : ELEVATOR_PARK_CREEP_DOWN_CMD;
+  // Mark park as recovering so updateElevatorParkHold doesn't fight us by
+  // reasserting the hold command on every tick.
+  const bool wasRecovering = elevatorParkRecovering;
+  elevatorParkRecovering = true;
+  if (currentLiftCommand != creepCmd) {
+    setLiftCommand(creepCmd);
   }
-
-  if (!elevatorParkRecovering) {
-    elevatorParkRecovering = true;
-    elevatorParkRecoverStartedMs = nowMs;
-    setLiftCommand(ELEVATOR_LIFT_RECOVER_CMD);
-    Serial.print(F("ELEVATOR PARK RECOVER slot="));
-    Serial.println(elevatorParkSlot + 1);
+  // Only print on direction change (or first entry into creep) so the serial
+  // log isn't flooded.
+  static bool lastCreepUp = false;
+  if (!wasRecovering || lastCreepUp != recoverUpward) {
+    lastCreepUp = recoverUpward;
+    Serial.print(F("ELEVATOR PARK CREEP slot="));
+    Serial.print(elevatorParkSlot + 1);
+    Serial.println(recoverUpward ? F(" dir=UP") : F(" dir=DOWN"));
   }
 }
 
 void updateElevatorParkHold() {
-  if (elevatorParkActive && !elevatorParkRecovering) {
-      if (elevatorParkSlot == 3 || elevatorParkSlot == 4) {
-        currentLiftCommand = SERVO_STOP_CMD;
-        pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
-      } else {
-        uint8_t holdCmd = getElevatorHoldCommand(elevatorParkSlot);
-        if (holdCmd != currentLiftCommand) {
-          setLiftCommand(holdCmd);
-        }
-      }
+  if (!elevatorParkActive || elevatorParkRecovering) {
+    return;
+  }
+  if (elevatorParkSlot == 4) {
+    if (currentLiftCommand != SERVO_STOP_CMD) {
+      currentLiftCommand = SERVO_STOP_CMD;
+      pcaSetPwm(ELEVATOR_LIFT_CHANNEL, 0, 0);
+    }
+    return;
+  }
+  const uint8_t holdCmd = getElevatorHoldCommand(elevatorParkSlot);
+  if (holdCmd != currentLiftCommand) {
+    setLiftCommand(holdCmd);
   }
 }
 
@@ -1674,15 +2069,49 @@ void servicePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
 }
 
 void serviceIr5Sensors() {
+  const unsigned long nowMs = millis();
+  const bool liftMoving = (currentLiftCommand != SERVO_STOP_CMD);
   for (uint8_t index = 0; index < 5; ++index) {
-    const bool detected = isDetected(digitalRead(IR5_PINS[index]));
-    if (detected != ir5LastState[index]) {
-      ir5LastState[index] = detected;
-      if (IR5_VERBOSE_LOG) {
-        Serial.print(F("IR5_"));
+    unsigned long debounceMs = liftMoving ? IR5_EDGE_DEBOUNCE_MOVING_MS : IR5_EDGE_DEBOUNCE_IDLE_MS;
+    if (index == 2) {
+      debounceMs = liftMoving ? 2 : 25;
+    }
+    if (index == 3 || index == 4) {
+      debounceMs = liftMoving ? 30 : 120;
+    }
+    const bool rawDetected = isIr5RawDetected(index);
+
+    // --- Dwell logic: require continuous detection for IR5_DWELL_MS ---
+    if (rawDetected) {
+      if (!ir5DwellActive[index]) {
+        ir5DwellActive[index] = true;
+        ir5DwellStartMs[index] = nowMs;
+      }
+    } else {
+      ir5DwellActive[index] = false;
+      ir5DwellStartMs[index] = 0;
+    }
+    bool dwellDetected = ir5DwellActive[index] && (nowMs - ir5DwellStartMs[index] >= IR5_DWELL_MS);
+
+    if (dwellDetected != ir5RawLastState[index]) {
+      if (IR5_RAW_EVENT_LOG) {
+        Serial.print(F("IR5-"));
         Serial.print(index + 1);
-        Serial.print('=');
-        Serial.println(detected ? F("DETECTED") : F("CLEAR"));
+        Serial.print(F(" RAW DWELL "));
+        Serial.println(dwellDetected ? F("DETECTED") : F("CLEARED"));
+      }
+      ir5RawLastState[index] = dwellDetected;
+      ir5RawChangedMs[index] = nowMs;
+    }
+
+    if (dwellDetected != ir5StableState[index] &&
+      (nowMs - ir5RawChangedMs[index]) >= debounceMs) {
+      ir5StableState[index] = dwellDetected;
+      if (liftMoving) {
+        Serial.print(F("IR5-"));
+        Serial.print(index + 1);
+        Serial.print(F(" STABLE DWELL "));
+        Serial.println(dwellDetected ? F("DETECTED") : F("CLEARED"));
       }
     }
   }
@@ -1848,7 +2277,10 @@ bool startWithdrawJobWithCounts(uint8_t counts[5]) {
   }
 
   withdrawJob.billsLeft = withdrawJob.slotCounts[withdrawJob.currentSlot];
-  setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+  setServoAngle(
+    storageChannelForSlot(withdrawJob.currentSlot),
+    storageCommandForSlot(withdrawJob.currentSlot, STORAGE_FORWARD_CMD)
+  );
   withdrawJob.stage = WD_SPIN_BILL;
   withdrawJob.stageStartedMs = withdrawJob.startedMs;
   Serial.print(F("WITHDRAW SPIN slot="));
@@ -1858,7 +2290,7 @@ bool startWithdrawJobWithCounts(uint8_t counts[5]) {
 }
 
 // ---------------------------------------------------------------------------
-// Withdrawal state machine – dispenses bills from storage via spinner reverse.
+// Withdrawal state machine – dispenses bills from storage using the configured slot direction.
 // ---------------------------------------------------------------------------
 
 bool calculateWithdrawBills(int amount, uint8_t counts[5]) {
@@ -2000,7 +2432,10 @@ void serviceWithdrawJob() {
     }
     case WD_BILL_GAP: {
       if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_INTER_BILL_GAP_MS) {
-        setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+        setServoAngle(
+          storageChannelForSlot(withdrawJob.currentSlot),
+          storageCommandForSlot(withdrawJob.currentSlot, STORAGE_FORWARD_CMD)
+        );
         withdrawJob.stage = WD_SPIN_BILL;
         withdrawJob.stageStartedMs = nowMs;
         Serial.print(F("WITHDRAW SPIN slot="));
@@ -2098,6 +2533,85 @@ void handleUsbCommand(String command) {
     Serial.print(F(" detected="));
     Serial.print(isM4IrDetected() ? F("1") : F("0"));
     Serial.println();
+    return;
+  }
+
+  if (commandUpper == F("SENSORSCAN")) {
+    Serial.println(F("=== IR SENSOR STATUS ==="));
+    Serial.println(F("Elevator Bill Path (IR5):"));
+    const int8_t faceSlot = currentIr5FaceSlot();
+    Serial.print(F("  FACE_LOCK slot="));
+    if (faceSlot >= 0) {
+      Serial.println(faceSlot + 1);
+    } else {
+      Serial.println(F("NONE/AMBIG"));
+    }
+    for (uint8_t i = 0; i < 5; ++i) {
+      Serial.print(F("  IR5-"));
+      Serial.print(i + 1);
+      Serial.print(F(" (slot "));
+      Serial.print(i + 1);
+      Serial.print(F("): raw="));
+      Serial.print(digitalRead(IR5_PINS[i]));
+      Serial.print(F(" rawDetected="));
+      Serial.print(isIr5RawDetected(i) ? F("YES") : F("NO"));
+      Serial.print(F(" polarity="));
+      Serial.print(ir5ActiveLow[i] ? F("LOW") : F("HIGH"));
+      Serial.print(F(" detected="));
+      Serial.println(isIr5Detected(i) ? F("YES") : F("NO"));
+    }
+    Serial.println(F("Motor 4 (Coin):"));
+    Serial.print(F("  M4IR: raw="));
+    Serial.print(digitalRead(M4_IR_PIN));
+    Serial.print(F(" detected="));
+    Serial.println(isM4IrDetected() ? F("YES") : F("NO"));
+    Serial.println(F("======================"));
+    return;
+  }
+
+  if (commandUpper.startsWith(F("IR5POL "))) {
+    int slot = 0;
+    char mode[12] = {0};
+    if (sscanf(command.c_str() + 7, "%d %11s", &slot, mode) != 2) {
+      Serial.println(F("ERR format: IR5POL <slot1to5> <LOW|HIGH|0|1>"));
+      return;
+    }
+    if (slot < 1 || slot > 5) {
+      Serial.println(F("ERR IR5POL slot 1..5"));
+      return;
+    }
+
+    String modeToken = String(mode);
+    modeToken.trim();
+    modeToken.toUpperCase();
+
+    bool activeLow = false;
+    bool valid = true;
+    if (modeToken == F("LOW") || modeToken == F("1")) {
+      activeLow = true;
+    } else if (modeToken == F("HIGH") || modeToken == F("0")) {
+      activeLow = false;
+    } else {
+      valid = false;
+    }
+
+    if (!valid) {
+      Serial.println(F("ERR IR5POL mode LOW|HIGH|0|1"));
+      return;
+    }
+
+    const uint8_t idx = static_cast<uint8_t>(slot - 1);
+    ir5ActiveLow[idx] = activeLow;
+    const bool initial = isIr5RawDetected(idx);
+    ir5RawLastState[idx] = initial;
+    ir5StableState[idx] = initial;
+    ir5RawChangedMs[idx] = millis();
+    ir5PreferredSlot = idx;
+
+    Serial.print(F("OK IR5POL slot="));
+    Serial.print(slot);
+    Serial.print(F(" polarity="));
+    Serial.println(activeLow ? F("LOW") : F("HIGH"));
     return;
   }
 
@@ -2224,13 +2738,184 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  if (commandUpper.startsWith(F("STORAGE "))) {
+    const String payload = command.substring(8);
+    const int split = payload.indexOf(' ');
+    if (split < 0) {
+      Serial.println(F("ERR format: STORAGE <slot1to5|ALL> <FORWARD|BACKWARD|STOP|cmd0to180>"));
+      return;
+    }
+
+    String slotToken = payload.substring(0, split);
+    String cmdToken = payload.substring(split + 1);
+    slotToken.trim();
+    cmdToken.trim();
+
+    String cmdUpper = cmdToken;
+    cmdUpper.toUpperCase();
+    const bool isForward = (cmdUpper == F("FORWARD"));
+    const bool isBackward = (cmdUpper == F("BACKWARD"));
+    const bool isStop = (cmdUpper == F("STOP"));
+
+    int cmd = -1;
+    if (isForward) {
+      cmd = SPINNER_RUN_CMD;
+    } else if (isBackward) {
+      cmd = SPINNER_WITHDRAW_CMD;
+    } else if (!isStop) {
+      bool numeric = (cmdToken.length() > 0);
+      for (uint16_t i = 0; i < cmdToken.length() && numeric; ++i) {
+        const char ch = cmdToken.charAt(i);
+        if (ch < '0' || ch > '9') {
+          numeric = false;
+        }
+      }
+      if (!numeric) {
+        Serial.println(F("ERR storage cmd use FORWARD/BACKWARD/STOP or 0..180"));
+        return;
+      }
+      cmd = cmdToken.toInt();
+      if (cmd < 0 || cmd > 180) {
+        Serial.println(F("ERR storage cmd 0..180"));
+        return;
+      }
+    }
+
+    String slotUpper = slotToken;
+    slotUpper.toUpperCase();
+
+    if (!motionArmed) {
+      motionArmed = true;
+      pcaAllChannelsOff();
+      Serial.println(F("OK ARMED (STORAGE)"));
+    }
+
+    if (isStop) {
+      if (slotUpper == F("ALL")) {
+        for (uint8_t slot = 0; slot < 5; ++slot) {
+          stopStorageMotor(slot);
+        }
+        Serial.println(F("OK STORAGE all STOP"));
+        return;
+      }
+
+      const int slot = slotToken.toInt();
+      if (slot < 1 || slot > 5) {
+        Serial.println(F("ERR storage slot 1..5"));
+        return;
+      }
+
+      stopStorageMotor(static_cast<uint8_t>(slot - 1));
+      Serial.print(F("OK STORAGE slot="));
+      Serial.print(slot);
+      Serial.println(F(" STOP"));
+      return;
+    }
+
+    if (slotUpper == F("ALL")) {
+      spinAllStorageMotors(static_cast<uint8_t>(cmd));
+      return;
+    }
+
+    const int slot = slotToken.toInt();
+    if (slot < 1 || slot > 5) {
+      Serial.println(F("ERR storage slot 1..5"));
+      return;
+    }
+
+    spinStorageMotor(static_cast<uint8_t>(slot - 1), static_cast<uint8_t>(cmd));
+    return;
+  }
+
+  if (commandUpper.startsWith(F("STORAGETEST "))) {
+    const int slot = command.substring(12).toInt();
+    if (slot < 1 || slot > 5) {
+      Serial.println(F("ERR storagetest slot 1..5"));
+      return;
+    }
+    runStorageTest(static_cast<uint8_t>(slot - 1));
+    return;
+  }
+
+  if (commandUpper == F("STORAGECONF")) {
+    printStorageConfig();
+    return;
+  }
+
+  if (commandUpper.startsWith(F("STORAGEMAP "))) {
+    int slot = 0;
+    int channel = 0;
+    if (sscanf(command.c_str() + 11, "%d %d", &slot, &channel) != 2) {
+      Serial.println(F("ERR format: STORAGEMAP <slot1to5> <channel0to4>"));
+      return;
+    }
+    if (slot < 1 || slot > 5 || channel < 0 || channel > 4) {
+      Serial.println(F("ERR STORAGEMAP slot 1..5 channel 0..4"));
+      return;
+    }
+    storageChannelMap[static_cast<uint8_t>(slot - 1)] = static_cast<uint8_t>(channel);
+    Serial.print(F("OK STORAGEMAP slot="));
+    Serial.print(slot);
+    Serial.print(F(" channel="));
+    Serial.println(channel);
+    return;
+  }
+
+  if (commandUpper.startsWith(F("STORAGEINV "))) {
+    int slot = 0;
+    int invert = 0;
+    if (sscanf(command.c_str() + 11, "%d %d", &slot, &invert) != 2) {
+      Serial.println(F("ERR format: STORAGEINV <slot1to5> <0|1>"));
+      return;
+    }
+    if (slot < 1 || slot > 5 || (invert != 0 && invert != 1)) {
+      Serial.println(F("ERR STORAGEINV slot 1..5 invert 0|1"));
+      return;
+    }
+    storageDirectionInverted[static_cast<uint8_t>(slot - 1)] = (invert != 0);
+    Serial.print(F("OK STORAGEINV slot="));
+    Serial.print(slot);
+    Serial.print(F(" inverted="));
+    Serial.println(invert);
+    return;
+  }
+
+  if (commandUpper.startsWith(F("STORAGESTOP"))) {
+    String slotToken = command.substring(11);
+    slotToken.trim();
+    if (slotToken.length() == 0) {
+      slotToken = F("ALL");
+    }
+
+    String slotUpper = slotToken;
+    slotUpper.toUpperCase();
+    if (slotUpper == F("ALL")) {
+      for (uint8_t slot = 0; slot < 5; ++slot) {
+        stopStorageMotor(slot);
+      }
+      Serial.println(F("OK STORAGESTOP all"));
+      return;
+    }
+
+    const int slot = slotToken.toInt();
+    if (slot < 1 || slot > 5) {
+      Serial.println(F("ERR storage slot 1..5"));
+      return;
+    }
+
+    stopStorageMotor(static_cast<uint8_t>(slot - 1));
+    Serial.print(F("OK STORAGESTOP slot="));
+    Serial.println(slot);
+    return;
+  }
+
   if (commandUpper == F("LIFTUP")) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
     }
     stopElevatorPark();
-    if (!validateLiftDirection(ELEVATOR_LIFT_UP_CMD)) {
+    if (!validateLiftDirection(ELEVATOR_LIFT_UP_CMD, 0)) {
       Serial.println(F("ERR already at top limit"));
       return;
     }
@@ -2245,7 +2930,7 @@ void handleUsbCommand(String command) {
       return;
     }
     stopElevatorPark();
-    if (!validateLiftDirection(ELEVATOR_LIFT_DOWN_CMD)) {
+    if (!validateLiftDirection(ELEVATOR_LIFT_DOWN_CMD, 4)) {
       Serial.println(F("ERR already at bottom limit"));
       return;
     }
@@ -2445,8 +3130,11 @@ void setup() {
   pinMode(BILL_PIN, INPUT_PULLUP);
   pinMode(COIN_PIN, INPUT_PULLUP);
   for (uint8_t index = 0; index < 5; ++index) {
-    pinMode(IR5_PINS[index], INPUT);
-    ir5LastState[index] = isDetected(digitalRead(IR5_PINS[index]));
+    pinMode(IR5_PINS[index], INPUT_PULLUP);
+    const bool initial = isIr5RawDetected(index);
+    ir5RawLastState[index] = initial;
+    ir5StableState[index] = initial;
+    ir5RawChangedMs[index] = millis();
   }
 
   releaseMotor4();
@@ -2555,7 +3243,7 @@ void loop() {
   pollRemoteCommands();
 
   const unsigned long nowMs = millis();
-  if (nowMs - lastLoopHeartbeatMs >= LOOP_HEARTBEAT_MS) {
+  if (LOOP_HEARTBEAT_VERBOSE && (nowMs - lastLoopHeartbeatMs >= LOOP_HEARTBEAT_MS)) {
     lastLoopHeartbeatMs = nowMs;
     Serial.print(F("ALIVE wifi="));
     Serial.print(WiFi.status());

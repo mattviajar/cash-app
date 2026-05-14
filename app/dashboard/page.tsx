@@ -121,8 +121,8 @@ function formatSignedPHP(value: number): string {
 
 function estimateWithdrawalSeconds(amount: number): number {
   const normalized = Math.max(20, Math.round(amount / 20) * 20)
-  const complexity = normalized >= 100 ? Math.ceil(normalized / 100) : Math.ceil(normalized / 20)
-  return Math.min(30, Math.max(8, 5 + complexity * 2))
+  const billCountEstimate = Math.max(1, Math.ceil(normalized / 20))
+  return Math.min(120, Math.max(8, 3 + billCountEstimate * 2))
 }
 
 async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
@@ -214,7 +214,7 @@ export default function DashboardPage() {
   const router = useRouter()
   const [role, setRole] = useState<Role>('kid')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('dashboard')
-  const [balance, setBalance] = useState(124.75)
+  const [balance, setBalance] = useState(0)
   const [withdrawAmount, setWithdrawAmount] = useState('')
   const [withdrawNote, setWithdrawNote] = useState('')
   const [instantWithdrawals, setInstantWithdrawals] = useState(false)
@@ -435,15 +435,11 @@ export default function DashboardPage() {
     kidCharacter,
   ])
 
-  useEffect(() => {
-    if (!isHydrated) return
-    if (role !== 'kid' || !kidName) return
-    setKidBalances((prev) => {
-      const current = prev[kidName] ?? 0
-      if (current === balance) return prev
-      return { ...prev, [kidName]: balance }
-    })
-  }, [isHydrated, role, kidName, balance])
+  // NOTE: We intentionally do NOT mirror `balance` back into `kidBalances`
+  // here. Every transaction site (deposit/withdraw/initial load) already
+  // updates `kidBalances` explicitly. A reciprocal effect would form a
+  // feedback loop with the kidBalances→balance sync below and cause the UI
+  // to jitter between the cached default and the freshly-fetched DB value.
 
   useEffect(() => {
     if (!isHydrated || role !== 'parent' || !parentName) return
@@ -2624,6 +2620,15 @@ export default function DashboardPage() {
                 <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
                 {pendingDepositReceived > 0 ? 'Money detected — keep inserting or wait for timer.' : 'Waiting for coins or bills…'}
               </div>
+
+              <button
+                type="button"
+                onClick={() => setDepositCountdown(0)}
+                disabled={pendingDepositReceived <= 0}
+                className="w-full rounded-xl bg-green-600 text-white px-4 py-2 font-inter font-semibold disabled:bg-gray-300 disabled:text-gray-500"
+              >
+                Apply Now
+              </button>
 
               <button
                 type="button"
