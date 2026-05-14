@@ -63,7 +63,7 @@ export async function POST(request: Request) {
 
   const payload = body as Record<string, unknown>
   const cmd = String(payload.command ?? '').trim()
-  if (!cmd || cmd.length > 128) {
+  if (!cmd || cmd.length > 256) {
     return NextResponse.json({ error: 'Missing or invalid command' }, { status: 400 })
   }
 

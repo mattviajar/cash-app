@@ -1,6 +1,8 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Preferences.h>
+#include <WiFiManager.h>
 #include <Wire.h>
 
 namespace {
@@ -125,18 +127,18 @@ constexpr uint8_t ELEVATOR_LIFT_RECOVER_CMD = 115;  // (legacy, no longer used b
 constexpr uint8_t ELEVATOR_PARK_CREEP_UP_CMD = 95;     // logical 95  → physical 85 (very weak UP)
 constexpr uint8_t ELEVATOR_PARK_CREEP_DOWN_CMD = 85;   // logical 85  → physical 95 (very weak DOWN)
 constexpr uint8_t ELEVATOR_LIFT_DOWN_CMD = 70;   // Slowed from 60 for IR sensor detection time
-// CH6 (output spinner) push direction. Earlier hardware test confirmed
-// `SERVO 6 180` is the FORWARD/push direction. Stop is 90; symmetric push
-// magnitude on the forward side is therefore (90 + (90-10)) = 170.
-constexpr uint8_t ELEVATOR_OUT_PUSH_CMD = 170;
+// CH6 (output spinner) push direction. Hardware test confirmed `SERVO 6 180`
+// is the FORWARD/push direction. Use 180 (full speed) to clear the servo's
+// deadband — 170 was sometimes too close to neutral to start the motor.
+constexpr uint8_t ELEVATOR_OUT_PUSH_CMD = 180;
 
 constexpr unsigned long ELEVATOR_NUDGE_MS = 180;
 constexpr unsigned long ELEVATOR_SETTLE_MS = 180;
-constexpr unsigned long ELEVATOR_OUT_PULSE_MS = 5000;
+constexpr unsigned long ELEVATOR_OUT_PULSE_MS = 8000;
 constexpr unsigned long SPINNER_PULSE_MS = 300;
 constexpr unsigned long ELEVATOR_RETURN_MS = 900;
-constexpr unsigned long ELEVATOR_ROUTE_TIMEOUT_MS = 9000;
-constexpr unsigned long BILL_ROUTE_SETTLE_MS = 60000; // wait after bill detected before routing (1 minute)
+constexpr unsigned long ELEVATOR_ROUTE_TIMEOUT_MS = 30000;
+constexpr unsigned long BILL_ROUTE_SETTLE_MS = 5000; // wait after last bill detected before routing (5s)
 constexpr unsigned long STORAGE_TEST_SPIN_MS = 1500;
 constexpr unsigned long ELEVATOR_TO_IR5_1_TIMEOUT_MS = 25000;
 constexpr unsigned long ELEVATOR_SLOT_MOVE_TIMEOUT_MS = 25000;
@@ -147,7 +149,8 @@ constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 180;
 constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 150;
 constexpr unsigned long ELEVATOR_LIFT_DIRECTION_TEST_MS = 2000;
 // Withdrawal timing
-constexpr unsigned long WITHDRAW_SPIN_MS = 2000;           // time to eject one bill
+constexpr unsigned long WITHDRAW_SPIN_MS = 1500;           // time to eject one bill (forward)
+constexpr unsigned long WITHDRAW_REVERSE_MS = 500;         // brief reverse to settle next bill back into position
 constexpr unsigned long WITHDRAW_INTER_BILL_GAP_MS = 600;  // pause between bills
 constexpr unsigned long WITHDRAW_TOTAL_TIMEOUT_MS = 120000; // 2-min safety timeout
 constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000;        // 15-min motor safety cap
@@ -203,6 +206,17 @@ constexpr PulseMap BILL_MAP[] = {
 
 constexpr char WIFI_SSID[] = "VSupreme";
 constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
+// Runtime-mutable copies. Loaded from NVS at boot (key "wifi/ssid" + "wifi/pass")
+// with the constexpr values above as fallback defaults. Updated at runtime by
+// the SETWIFI command (sent via the dashboard) and persisted across reboots.
+String runtimeWifiSsid = WIFI_SSID;
+String runtimeWifiPassword = WIFI_PASSWORD;
+// Captive-portal AP credentials (shown on the customer's phone WiFi list when
+// the device cannot reach a known network). They join this AP, open the
+// captive portal page, and type in their home WiFi credentials.
+constexpr char SETUP_AP_SSID[] = "ATM-Setup";
+constexpr char SETUP_AP_PASSWORD[] = "setup1234"; // 8+ chars required by WiFi spec
+constexpr unsigned long SETUP_PORTAL_TIMEOUT_S = 180; // 3 min
 constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
 constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
 constexpr char DEVICE_STATUS_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/device/status";
@@ -285,6 +299,7 @@ enum WithdrawStage {
   WD_IDLE,
   WD_MOVE_TO_SLOT,
   WD_SPIN_BILL,
+  WD_REVERSE_BILL,
   WD_BILL_GAP,
   WD_MOVE_HOME,
 };
@@ -316,6 +331,16 @@ PulseInput coinInput = {COIN_PIN, "coin", true, false, 0, 0, COIN_IDLE_GAP_MS, f
 PulseInput billInput = {BILL_PIN, "bill", true, false, 0, 0, BILL_IDLE_GAP_MS, false, 0};
 BillRouteJob billRoute = {};
 WithdrawJob withdrawJob = {};
+
+// When a WITHDRAW command includes BOTH bills and coins, we run the bill
+// spinner job first (biggest denominations come out first) and stash the coin
+// payout amount here. The coin steppers are only kicked off after the bill job
+// finishes so the two motor systems never run at the same time.
+struct PendingWithdraw {
+  bool active;
+  int coinAmount;
+};
+PendingWithdraw pendingWithdraw = {};
 bool liftToIr51Active = false;
 LiftToIr51Stage liftToIr51Stage = LIFT_TO_1_FIND;
 unsigned long liftToIr51StartedMs = 0;
@@ -528,11 +553,33 @@ float mapPulseCount(const PulseMap* table, size_t length, uint8_t pulses) {
       return table[index].amount;
     }
   }
+  // Tolerance fallback: if pulse count is within +/- 1 of a unique map entry,
+  // accept it. This catches noisy bill acceptor pulses where a single edge is
+  // missed or doubled, instead of swallowing the bill silently.
+  if (pulses == 0) return 0.0f;
+  int matchIndex = -1;
+  for (size_t index = 0; index < length; ++index) {
+    const int diff = static_cast<int>(table[index].pulses) - static_cast<int>(pulses);
+    if (diff >= -1 && diff <= 1) {
+      if (matchIndex >= 0) {
+        // Ambiguous (two adjacent map entries within tolerance); reject.
+        return 0.0f;
+      }
+      matchIndex = static_cast<int>(index);
+    }
+  }
+  if (matchIndex >= 0) {
+    Serial.print(F("WARN pulse tolerance match pulses="));
+    Serial.print(pulses);
+    Serial.print(F(" assumed="));
+    Serial.println(table[matchIndex].amount, 2);
+    return table[matchIndex].amount;
+  }
   return 0.0f;
 }
 
 bool ensureWifi() {
-  if (WIFI_SSID[0] == '\0' || DEPOSIT_API_URL[0] == '\0') {
+  if (runtimeWifiSsid.length() == 0 || DEPOSIT_API_URL[0] == '\0') {
     return false;
   }
   if (WiFi.status() == WL_CONNECTED) {
@@ -546,8 +593,9 @@ bool ensureWifi() {
   lastWifiAttemptMs = nowMs;
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.println(F("Connecting to WiFi..."));
+  WiFi.begin(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str());
+  Serial.print(F("Connecting to WiFi ssid="));
+  Serial.println(runtimeWifiSsid);
 
   const unsigned long startedMs = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedMs < 5000) {
@@ -562,6 +610,81 @@ bool ensureWifi() {
 
   Serial.println(F("WiFi not connected"));
   return false;
+}
+
+// Load WiFi credentials from non-volatile storage (NVS). Returns true if a
+// non-empty SSID was loaded; otherwise the compile-time defaults remain.
+void loadWifiCredentials() {
+  Preferences prefs;
+  if (!prefs.begin("atm-wifi", true)) {
+    Serial.println(F("WIFI prefs begin (read) failed; using defaults"));
+    return;
+  }
+  String savedSsid = prefs.getString("ssid", "");
+  String savedPass = prefs.getString("pass", "");
+  prefs.end();
+  if (savedSsid.length() > 0) {
+    runtimeWifiSsid = savedSsid;
+    runtimeWifiPassword = savedPass;
+    Serial.print(F("WIFI loaded from NVS ssid="));
+    Serial.println(runtimeWifiSsid);
+  } else {
+    Serial.print(F("WIFI no NVS creds; default ssid="));
+    Serial.println(runtimeWifiSsid);
+  }
+}
+
+// Persist new WiFi credentials to NVS so they survive reboot.
+bool saveWifiCredentials(const String& ssid, const String& pass) {
+  Preferences prefs;
+  if (!prefs.begin("atm-wifi", false)) {
+    Serial.println(F("ERR wifi prefs begin (write) failed"));
+    return false;
+  }
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+  return true;
+}
+
+// Apply new WiFi credentials at runtime: persist + disconnect + reconnect on
+// next ensureWifi() tick. Used by the SETWIFI command from the dashboard.
+void applyNewWifiCredentials(const String& ssid, const String& pass) {
+  Serial.print(F("WIFI updating ssid="));
+  Serial.println(ssid);
+  if (!saveWifiCredentials(ssid, pass)) {
+    return;
+  }
+  runtimeWifiSsid = ssid;
+  runtimeWifiPassword = pass;
+  WiFi.disconnect(false, true);
+  lastWifiAttemptMs = 0;
+  Serial.println(F("WIFI credentials saved; reconnect pending"));
+}
+
+// Block in WiFiManager captive-portal AP mode so the customer can join the
+// "ATM-Setup" hotspot from their phone and enter their home WiFi credentials.
+// Called at boot when no valid network is reachable.
+void runWifiSetupPortal() {
+  Serial.println(F("WIFI starting captive portal AP=ATM-Setup"));
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_S);
+  wm.setBreakAfterConfig(true);
+  wm.setConnectTimeout(15);
+  // startConfigPortal blocks until creds are entered or timeout.
+  if (wm.startConfigPortal(SETUP_AP_SSID, SETUP_AP_PASSWORD)) {
+    String newSsid = WiFi.SSID();
+    String newPass = WiFi.psk();
+    if (newSsid.length() > 0) {
+      saveWifiCredentials(newSsid, newPass);
+      runtimeWifiSsid = newSsid;
+      runtimeWifiPassword = newPass;
+      Serial.print(F("WIFI portal saved ssid="));
+      Serial.println(newSsid);
+    }
+  } else {
+    Serial.println(F("WIFI portal timeout (continuing without WiFi)"));
+  }
 }
 
 void postDeposit(float amount, const char* source, uint8_t pulses) {
@@ -1068,10 +1191,13 @@ void startBillRouteIfPending() {
   billRoute.stageStartedMs = billRoute.startedMs;
   billRoute.liftRunning = false;
 
+  // Only CH6 (output spinner on the elevator) runs during a deposit. CH0..CH4
+  // are dispensers used for WITHDRAWAL only — they must stay idle here.
   setServoAngle(ELEVATOR_OUT_CHANNEL, ELEVATOR_OUT_PUSH_CMD);
-  setServoAngle(SPINNER_CHANNEL_MIN + targetSlot, SPINNER_RUN_CMD);
   Serial.print(F("BILL ROUTE TRANSFER slot="));
-  Serial.println(targetSlot + 1);
+  Serial.print(targetSlot + 1);
+  Serial.print(F(" ch6="));
+  Serial.println(ELEVATOR_OUT_PUSH_CMD);
 }
 
 void stopElevatorOutMotor() {
@@ -2282,7 +2408,10 @@ bool startWithdrawJobWithCounts(uint8_t counts[5]) {
     storageCommandForSlot(withdrawJob.currentSlot, STORAGE_FORWARD_CMD)
   );
   withdrawJob.stage = WD_SPIN_BILL;
-  withdrawJob.stageStartedMs = withdrawJob.startedMs;
+  // Use current time, NOT withdrawJob.startedMs: postWithdrawStatus() above
+  // can take several seconds for the HTTP call, which would make the
+  // 2-second spin window already-elapsed on the very first service tick.
+  withdrawJob.stageStartedMs = millis();
   Serial.print(F("WITHDRAW SPIN slot="));
   Serial.print(withdrawJob.currentSlot + 1);
   Serial.print(F(" bills_left=")); Serial.println(withdrawJob.billsLeft);
@@ -2306,6 +2435,30 @@ bool calculateWithdrawBills(int amount, uint8_t counts[5]) {
   counts[0] = static_cast<uint8_t>(amount / 20);   amount %= 20;
   // Remainder (0-19) handled separately by coin payout motors.
   return true;
+}
+
+// Kick off the deferred coin payout once the bill spinner job has finished
+// and no other motor activity is happening. Enforces strict one-motor-at-a-
+// time dispensing (bills first, then coins).
+void servicePendingWithdraw() {
+  if (!pendingWithdraw.active) return;
+  if (withdrawJob.active) return;
+  if (taskCount > 0) return;
+  if (remoteTaskActive) return;
+  if (motor4Job.active) return;
+  if (billRoute.active) return;
+
+  const int amount = pendingWithdraw.coinAmount;
+  pendingWithdraw = {};
+  Serial.print(F("WITHDRAW coins RESUMING (bills done) amount="));
+  Serial.println(amount);
+  handlePayoutCommand(amount);
+  Serial.print(F("WITHDRAW coins QUEUED tasks_after="));
+  Serial.print(taskCount);
+  Serial.print(F(" remoteActive="));
+  Serial.print(remoteTaskActive ? F("1") : F("0"));
+  Serial.print(F(" motor4Active="));
+  Serial.println(motor4Job.active ? F("1") : F("0"));
 }
 
 void advanceWithdrawToNextSlot() {
@@ -2346,7 +2499,16 @@ bool startWithdrawJob(int amount) {
     - counts[4] * 1000 - counts[3] * 500
     - counts[2] * 100  - counts[1] * 50
     - counts[0] * 20;
-  if (coinRemainder > 0) {
+
+  const bool hasBills = (counts[0] || counts[1] || counts[2] || counts[3] || counts[4]);
+  if (coinRemainder > 0 && hasBills) {
+    // Defer coin payout until the bill spinner job finishes so only one motor
+    // system runs at a time, and the larger denominations come out first.
+    pendingWithdraw.active = true;
+    pendingWithdraw.coinAmount = coinRemainder;
+    Serial.print(F("WITHDRAW coins DEFERRED until bills finish amount="));
+    Serial.println(coinRemainder);
+  } else if (coinRemainder > 0) {
     handlePayoutCommand(coinRemainder);
   }
 
@@ -2416,6 +2578,20 @@ void serviceWithdrawJob() {
     }
     case WD_SPIN_BILL: {
       if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_SPIN_MS) {
+        // Reverse briefly so the next bill in the stack settles back into position.
+        setServoAngle(
+          storageChannelForSlot(withdrawJob.currentSlot),
+          storageCommandForSlot(withdrawJob.currentSlot, STORAGE_BACKWARD_CMD)
+        );
+        withdrawJob.stage = WD_REVERSE_BILL;
+        withdrawJob.stageStartedMs = nowMs;
+        Serial.print(F("WITHDRAW REVERSE slot="));
+        Serial.println(withdrawJob.currentSlot + 1);
+      }
+      break;
+    }
+    case WD_REVERSE_BILL: {
+      if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_REVERSE_MS) {
         stopStorageMotor(withdrawJob.currentSlot);
         --withdrawJob.billsLeft;
         Serial.print(F("WITHDRAW EJECTED slot="));
@@ -2468,6 +2644,30 @@ void handleUsbCommand(String command) {
     printStatus();
     UnoSerial.print('@');
     UnoSerial.println(F("STATUS"));
+    return;
+  }
+
+  // SETWIFI ssid="..." pass="..."  -- update WiFi creds at runtime, persist to NVS.
+  if (commandUpper.startsWith(F("SETWIFI"))) {
+    auto extractQuoted = [&](const char* key) -> String {
+      int idx = command.indexOf(key);
+      if (idx < 0) return String();
+      int eq = command.indexOf('=', idx);
+      if (eq < 0) return String();
+      int q1 = command.indexOf('"', eq);
+      if (q1 < 0) return String();
+      int q2 = command.indexOf('"', q1 + 1);
+      if (q2 < 0) return String();
+      return command.substring(q1 + 1, q2);
+    };
+    String newSsid = extractQuoted("ssid");
+    String newPass = extractQuoted("pass");
+    if (newSsid.length() == 0) {
+      Serial.println(F("ERR SETWIFI missing ssid"));
+      return;
+    }
+    applyNewWifiCredentials(newSsid, newPass);
+    Serial.println(F("OK SETWIFI saved"));
     return;
   }
   if (commandUpper == F("ARM")) {
@@ -2699,20 +2899,12 @@ void handleUsbCommand(String command) {
       Serial.println(F("WARN WITHDRAW amount missing; defaulting to 20"));
     }
     
-    // Handle coins first via motor 4 (stepper)
+    // Bills first (largest denominations first), then defer coins until bills
+    // finish so the two motor systems never run at the same time.
     int coinTotal = coin1 * 1 + coin5 * 5 + coin10 * 10 + coin20 * 20;
-    if (coinTotal > 0) {
-      Serial.print(F("WITHDRAW coins coin1="));
-      Serial.print(coin1); Serial.print(F(" coin5="));
-      Serial.print(coin5); Serial.print(F(" coin10="));
-      Serial.print(coin10); Serial.print(F(" coin20="));
-      Serial.print(coin20); Serial.print(F(" total="));
-      Serial.println(coinTotal);
-      handlePayoutCommand(coinTotal);
-    }
-    
-    // Handle bills via storage spinners
-    if (bill20 > 0 || bill50 > 0 || bill100 > 0 || bill500 > 0 || bill1000 > 0) {
+    const bool hasBills = (bill20 > 0 || bill50 > 0 || bill100 > 0 || bill500 > 0 || bill1000 > 0);
+
+    if (hasBills) {
       uint8_t counts[5] = {
         static_cast<uint8_t>(bill20),
         static_cast<uint8_t>(bill50),
@@ -2720,7 +2912,21 @@ void handleUsbCommand(String command) {
         static_cast<uint8_t>(bill500),
         static_cast<uint8_t>(bill1000)
       };
+      if (coinTotal > 0) {
+        pendingWithdraw.active = true;
+        pendingWithdraw.coinAmount = coinTotal;
+        Serial.print(F("WITHDRAW coins DEFERRED until bills finish amount="));
+        Serial.println(coinTotal);
+      }
       startWithdrawJobWithCounts(counts);
+    } else if (coinTotal > 0) {
+      Serial.print(F("WITHDRAW coins-only coin1="));
+      Serial.print(coin1); Serial.print(F(" coin5="));
+      Serial.print(coin5); Serial.print(F(" coin10="));
+      Serial.print(coin10); Serial.print(F(" coin20="));
+      Serial.print(coin20); Serial.print(F(" total="));
+      Serial.println(coinTotal);
+      handlePayoutCommand(coinTotal);
     } else if (coinTotal == 0) {
       // No coins and no bills - error
       Serial.println(F("ERR WITHDRAW empty breakdown"));
@@ -3197,11 +3403,12 @@ void setup() {
   }
 
   // Initiate Wi-Fi connection on boot
-  if (WIFI_SSID[0] != '\0' && DEPOSIT_API_URL[0] != '\0') {
+  loadWifiCredentials();
+  if (runtimeWifiSsid.length() != 0 && DEPOSIT_API_URL[0] != '\0') {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str());
     Serial.print(F("Connecting to WiFi "));
-    Serial.println(WIFI_SSID);
+    Serial.println(runtimeWifiSsid);
     for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
       delay(500);
       Serial.print(".");
@@ -3210,8 +3417,12 @@ void setup() {
       Serial.print(F("\nWiFi connected: "));
       Serial.println(WiFi.localIP());
     } else {
-      Serial.println(F("\nWiFi connection timeout"));
+      Serial.println(F("\nWiFi connection timeout; launching setup portal"));
+      runWifiSetupPortal();
     }
+  } else {
+    Serial.println(F("WIFI no credentials; launching setup portal"));
+    runWifiSetupPortal();
   }
 
   UnoSerial.print('@');
@@ -3239,6 +3450,7 @@ void loop() {
   serviceLiftHardLimits();
   serviceLocalMotor4();
   startNextQueuedTask();
+  servicePendingWithdraw();
   serviceWithdrawJob();
   pollRemoteCommands();
 

@@ -227,6 +227,11 @@ export default function DashboardPage() {
   const [kidDailyWithdrawLimit, setKidDailyWithdrawLimit] = useState(25)
   const [parentSpendingAlerts, setParentSpendingAlerts] = useState(true)
   const [parentAutoApproveLimit, setParentAutoApproveLimit] = useState(0)
+  // Device WiFi configuration (sent to ESP32 via SETWIFI command queue)
+  const [wifiSsid, setWifiSsid] = useState('')
+  const [wifiPass, setWifiPass] = useState('')
+  const [wifiSaving, setWifiSaving] = useState(false)
+  const [wifiMessage, setWifiMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [newGoalName, setNewGoalName] = useState('')
   const [newGoalTarget, setNewGoalTarget] = useState('')
   const [kidCharacter, setKidCharacter] = useState('astronaut')
@@ -2208,6 +2213,81 @@ export default function DashboardPage() {
     <section className="space-y-6">
       <div className="glass-card space-y-5">
         <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Parent Settings</h3>
+
+        <div className="bg-white/70 rounded-xl p-4 space-y-3">
+          <div>
+            <p className="font-inter font-semibold text-gray-800">📶 Device WiFi</p>
+            <p className="text-sm text-gray-600 font-inter">
+              Change the WiFi network the ATM device connects to. The new credentials are sent to the device on its next poll (~10 seconds) and saved permanently.
+            </p>
+            <p className="text-xs text-amber-700 font-inter mt-1">
+              First-time setup: if the device cannot reach any saved network, it broadcasts a setup hotspot named <span className="font-mono">ATM-Setup</span> (password <span className="font-mono">setup1234</span>). Connect to it from your phone and follow the captive portal to enter your home WiFi.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input
+              type="text"
+              placeholder="WiFi SSID"
+              value={wifiSsid}
+              onChange={(e) => setWifiSsid(e.target.value)}
+              maxLength={32}
+              className="px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+            />
+            <input
+              type="password"
+              placeholder="WiFi Password"
+              value={wifiPass}
+              onChange={(e) => setWifiPass(e.target.value)}
+              maxLength={63}
+              className="px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              disabled={wifiSaving || wifiSsid.trim().length === 0}
+              onClick={async () => {
+                setWifiMessage(null)
+                const ssid = wifiSsid.trim()
+                const pass = wifiPass
+                if (!ssid) return
+                if (ssid.includes('"') || pass.includes('"')) {
+                  setWifiMessage({ kind: 'err', text: 'SSID and password cannot contain double-quote (") characters.' })
+                  return
+                }
+                setWifiSaving(true)
+                try {
+                  const command = `SETWIFI ssid="${ssid}" pass="${pass}"`
+                  const res = await fetch('/api/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command }),
+                  })
+                  const data = await res.json().catch(() => ({}))
+                  if (!res.ok) {
+                    setWifiMessage({ kind: 'err', text: (data && data.error) || `Request failed (${res.status})` })
+                  } else {
+                    setWifiMessage({ kind: 'ok', text: 'Sent. Device will reconnect within ~10 seconds.' })
+                    setWifiPass('')
+                  }
+                } catch (err) {
+                  setWifiMessage({ kind: 'err', text: err instanceof Error ? err.message : 'Network error' })
+                } finally {
+                  setWifiSaving(false)
+                }
+              }}
+              className="px-4 py-2 rounded-lg font-sora font-semibold transition-all bg-gradient-to-r from-blue-600 to-teal-500 text-white disabled:opacity-50"
+            >
+              {wifiSaving ? 'Sending…' : 'Send to Device'}
+            </button>
+            {wifiMessage && (
+              <span className={`text-sm font-inter ${wifiMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+                {wifiMessage.text}
+              </span>
+            )}
+          </div>
+        </div>
+
         <div className="bg-white/70 rounded-xl p-4 flex items-center justify-between gap-4">
           <div>
             <p className="font-inter font-semibold text-gray-800">Allow immediate kid withdrawals</p>
