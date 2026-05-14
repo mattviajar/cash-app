@@ -2,7 +2,6 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
-#include <WiFiManager.h>
 #include <Wire.h>
 
 namespace {
@@ -204,19 +203,17 @@ constexpr PulseMap BILL_MAP[] = {
   {100, 1000.0f},
 };
 
-constexpr char WIFI_SSID[] = "VSupreme";
-constexpr char WIFI_PASSWORD[] = "Fffggghhh123";
-// Runtime-mutable copies. Loaded from NVS at boot (key "wifi/ssid" + "wifi/pass")
-// with the constexpr values above as fallback defaults. Updated at runtime by
-// the SETWIFI command (sent via the dashboard) and persisted across reboots.
+// Hardcoded fallback network. The customer can broadcast a phone hotspot
+// with this SSID/password and the ATM will auto-connect on first boot.
+// Once online they open the dashboard and use the SETWIFI form to switch
+// the device onto their permanent WiFi (saved to NVS).
+constexpr char WIFI_SSID[] = "CASHWIFI";
+constexpr char WIFI_PASSWORD[] = "CASH12345!";
+// Runtime-mutable copies. Loaded from NVS at boot (namespace "atm-wifi",
+// keys "ssid"/"pass") with the constexpr fallback above as the default.
+// Updated at runtime by the SETWIFI command from the dashboard.
 String runtimeWifiSsid = WIFI_SSID;
 String runtimeWifiPassword = WIFI_PASSWORD;
-// Captive-portal AP credentials (shown on the customer's phone WiFi list when
-// the device cannot reach a known network). They join this AP, open the
-// captive portal page, and type in their home WiFi credentials.
-constexpr char SETUP_AP_SSID[] = "ATM-Setup";
-constexpr char SETUP_AP_PASSWORD[] = "setup1234"; // 8+ chars required by WiFi spec
-constexpr unsigned long SETUP_PORTAL_TIMEOUT_S = 180; // 3 min
 constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
 constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
 constexpr char DEVICE_STATUS_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/device/status";
@@ -578,8 +575,29 @@ float mapPulseCount(const PulseMap* table, size_t length, uint8_t pulses) {
   return 0.0f;
 }
 
+// Try to connect to ssid/pass synchronously, blocking up to timeoutMs.
+bool tryWifiConnect(const char* ssid, const char* pass, unsigned long timeoutMs) {
+  if (ssid == nullptr || ssid[0] == '\0') return false;
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false, true);
+  delay(50);
+  WiFi.begin(ssid, pass);
+  Serial.print(F("Connecting to WiFi ssid="));
+  Serial.println(ssid);
+  const unsigned long startedMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedMs < timeoutMs) {
+    delay(100);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("WiFi connected: "));
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+  return false;
+}
+
 bool ensureWifi() {
-  if (runtimeWifiSsid.length() == 0 || DEPOSIT_API_URL[0] == '\0') {
+  if (DEPOSIT_API_URL[0] == '\0') {
     return false;
   }
   if (WiFi.status() == WL_CONNECTED) {
@@ -592,20 +610,23 @@ bool ensureWifi() {
   }
   lastWifiAttemptMs = nowMs;
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str());
-  Serial.print(F("Connecting to WiFi ssid="));
-  Serial.println(runtimeWifiSsid);
-
-  const unsigned long startedMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedMs < 5000) {
-    delay(100);
+  // First try the active runtime credentials (NVS-saved or default fallback).
+  if (runtimeWifiSsid.length() > 0) {
+    if (tryWifiConnect(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str(), 5000)) {
+      return true;
+    }
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print(F("WiFi connected: "));
-    Serial.println(WiFi.localIP());
-    return true;
+  // If the active creds fail and they aren't already the hardcoded fallback,
+  // try the fallback (CASHWIFI). This is the customer-recovery path: power up
+  // a phone hotspot named CASHWIFI/CASH12345! and the device will reconnect
+  // even if a previously-saved SSID is no longer reachable.
+  if (runtimeWifiSsid != WIFI_SSID) {
+    Serial.print(F("WiFi primary failed; trying fallback ssid="));
+    Serial.println(WIFI_SSID);
+    if (tryWifiConnect(WIFI_SSID, WIFI_PASSWORD, 5000)) {
+      return true;
+    }
   }
 
   Serial.println(F("WiFi not connected"));
@@ -660,31 +681,6 @@ void applyNewWifiCredentials(const String& ssid, const String& pass) {
   WiFi.disconnect(false, true);
   lastWifiAttemptMs = 0;
   Serial.println(F("WIFI credentials saved; reconnect pending"));
-}
-
-// Block in WiFiManager captive-portal AP mode so the customer can join the
-// "ATM-Setup" hotspot from their phone and enter their home WiFi credentials.
-// Called at boot when no valid network is reachable.
-void runWifiSetupPortal() {
-  Serial.println(F("WIFI starting captive portal AP=ATM-Setup"));
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_S);
-  wm.setBreakAfterConfig(true);
-  wm.setConnectTimeout(15);
-  // startConfigPortal blocks until creds are entered or timeout.
-  if (wm.startConfigPortal(SETUP_AP_SSID, SETUP_AP_PASSWORD)) {
-    String newSsid = WiFi.SSID();
-    String newPass = WiFi.psk();
-    if (newSsid.length() > 0) {
-      saveWifiCredentials(newSsid, newPass);
-      runtimeWifiSsid = newSsid;
-      runtimeWifiPassword = newPass;
-      Serial.print(F("WIFI portal saved ssid="));
-      Serial.println(newSsid);
-    }
-  } else {
-    Serial.println(F("WIFI portal timeout (continuing without WiFi)"));
-  }
 }
 
 void postDeposit(float amount, const char* source, uint8_t pulses) {
@@ -3402,28 +3398,11 @@ void setup() {
     }
   }
 
-  // Initiate Wi-Fi connection on boot
+  // Initiate Wi-Fi connection on boot. ensureWifi() handles primary +
+  // fallback (CASHWIFI/CASH12345!) automatically; loop() will keep retrying
+  // every 5 s if the first attempt times out.
   loadWifiCredentials();
-  if (runtimeWifiSsid.length() != 0 && DEPOSIT_API_URL[0] != '\0') {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str());
-    Serial.print(F("Connecting to WiFi "));
-    Serial.println(runtimeWifiSsid);
-    for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
-      delay(500);
-      Serial.print(".");
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.print(F("\nWiFi connected: "));
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println(F("\nWiFi connection timeout; launching setup portal"));
-      runWifiSetupPortal();
-    }
-  } else {
-    Serial.println(F("WIFI no credentials; launching setup portal"));
-    runWifiSetupPortal();
-  }
+  ensureWifi();
 
   UnoSerial.print('@');
   UnoSerial.println(F("PING"));

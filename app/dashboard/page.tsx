@@ -2221,7 +2221,7 @@ export default function DashboardPage() {
               Change the WiFi network the ATM device connects to. The new credentials are sent to the device on its next poll (~10 seconds) and saved permanently.
             </p>
             <p className="text-xs text-amber-700 font-inter mt-1">
-              First-time setup: if the device cannot reach any saved network, it broadcasts a setup hotspot named <span className="font-mono">ATM-Setup</span> (password <span className="font-mono">setup1234</span>). Connect to it from your phone and follow the captive portal to enter your home WiFi.
+              First-time setup / recovery: turn on a phone hotspot named <span className="font-mono">CASHWIFI</span> with password <span className="font-mono">CASH12345!</span>. The ATM auto-connects to this fallback network. Once it&apos;s online, use the form below to switch it onto your permanent WiFi.
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
