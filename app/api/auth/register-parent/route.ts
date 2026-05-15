@@ -4,7 +4,20 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { hashPassword } from '@/lib/password'
 
+// Single-tenant lockdown. Public registration is disabled by default.
+// Set REGISTRATION_ENABLED="true" at deploy time to re-open it.
+// Even when enabled, only usernames in ALLOWED_USERNAMES may register.
+const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED === 'true'
+const ALLOWED_USERNAMES = (process.env.ALLOWED_USERNAMES ?? 'matt,james')
+  .split(',')
+  .map((u) => u.trim().toLowerCase())
+  .filter(Boolean)
+
 export async function POST(request: Request) {
+  if (!REGISTRATION_ENABLED) {
+    return NextResponse.json({ error: 'Registration is disabled' }, { status: 403 })
+  }
+
   let body: unknown
   try {
     body = await request.json()
@@ -22,9 +35,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  const parentExists = await prisma.account.findFirst({ where: { role: 'parent' } })
-  if (parentExists) {
-    return NextResponse.json({ error: 'Parent account already exists' }, { status: 409 })
+  if (!ALLOWED_USERNAMES.includes(username)) {
+    return NextResponse.json({ error: 'Username not permitted' }, { status: 403 })
+  }
+
+  const usernameTaken = await prisma.account.findUnique({ where: { username } })
+  if (usernameTaken) {
+    return NextResponse.json({ error: 'Username already taken' }, { status: 409 })
   }
 
   try {

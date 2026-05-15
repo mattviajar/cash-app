@@ -9,7 +9,7 @@ namespace {
 constexpr long USB_SERIAL_BAUD = 115200;
 constexpr long UNO_SERIAL_BAUD = 9600;
 constexpr uint8_t UNO_RX_PIN = 16;
-constexpr uint8_t UNO_TX_PIN = 17;
+constexpr uint8_t UNO_TX_PIN = 5;  // moved off GPIO17 (suspect dead) to GPIO5
 constexpr bool STEPPERS_ENABLED = true;
 constexpr bool SERVOS_ENABLED = true;
 constexpr bool MOTION_ARMED_DEFAULT = true;
@@ -362,6 +362,9 @@ unsigned long ir5RawChangedMs[5] = {0, 0, 0, 0, 0};
 unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
 bool unoOnline = false;
 bool remoteTaskActive = false;
+unsigned long remoteTaskSentMs = 0;
+uint8_t remoteTaskMotor = 0;
+uint8_t remoteTaskCount = 0;
 uint8_t m4PinMap[4] = {0, 1, 2, 3}; // maps step columns → IN1/IN2/IN3/IN4 (try different orderings to find working wiring)
 int m4IrBaselineLevel = HIGH;
 bool motionArmed = MOTION_ARMED_DEFAULT;
@@ -397,6 +400,7 @@ constexpr unsigned long IR5_DWELL_MS = 150;
 void stopElevatorPark();
 void startElevatorPark(uint8_t slot);
 void handleUsbCommand(String command);
+void handleUnoLine(const String& line);
 
 void pcaWriteRegister(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(PCA9685_ADDRESS);
@@ -1451,7 +1455,20 @@ void startNextQueuedTask() {
   UnoSerial.print(nextTask.motor);
   UnoSerial.print(' ');
   UnoSerial.println(nextTask.count);
+  Serial.print(F(">UNO>@DISPENSE "));
+  Serial.print(nextTask.motor);
+  Serial.print(' ');
+  Serial.println(nextTask.count);
   remoteTaskActive = true;
+  remoteTaskSentMs = millis();
+  remoteTaskMotor = nextTask.motor;
+  remoteTaskCount = nextTask.count;
+  Serial.print(F("SENT @DISPENSE motor="));
+  Serial.print(nextTask.motor);
+  Serial.print(F(" count="));
+  Serial.print(nextTask.count);
+  Serial.print(F(" unoOnline="));
+  Serial.println(unoOnline ? F("1") : F("0"));
 }
 
 void stopAllDispense() {
@@ -1461,6 +1478,7 @@ void stopAllDispense() {
   releaseMotor4();
   UnoSerial.print('@');
   UnoSerial.println(F("STOP"));
+  Serial.println(F(">UNO>@STOP"));
   Serial.println(F("OK STOP"));
 }
 
@@ -2633,6 +2651,11 @@ void handleUsbCommand(String command) {
   if (command.length() == 0) {
     return;
   }
+  // PC-bridge inbound: lines like "<UNO<PONG" are treated as if they came from UnoSerial.
+  if (command.startsWith("<UNO<")) {
+    handleUnoLine(command.substring(5));
+    return;
+  }
   String commandUpper = command;
   commandUpper.toUpperCase();
 
@@ -2640,6 +2663,7 @@ void handleUsbCommand(String command) {
     printStatus();
     UnoSerial.print('@');
     UnoSerial.println(F("STATUS"));
+    Serial.println(F(">UNO>@STATUS"));
     return;
   }
 
@@ -2683,8 +2707,13 @@ void handleUsbCommand(String command) {
     return;
   }
   if (commandUpper == F("PINGUNO")) {
+    Serial.print(F("DEBUG writing @PING to UnoSerial on TX pin "));
+    Serial.println(UNO_TX_PIN);
     UnoSerial.print('@');
     UnoSerial.println(F("PING"));
+    UnoSerial.flush();
+    Serial.println(F(">UNO>@PING"));
+    Serial.println(F("DEBUG @PING flushed"));
     return;
   }
   if (commandUpper == F("STOP")) {
@@ -3245,6 +3274,15 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  // DEPOSIT [amount] is a no-op on the ESP. Real deposits come from the bill
+  // acceptor (GPIO32) which calls postDeposit() directly. Accept the command
+  // silently so stray cloud-queued DEPOSIT messages don't trigger ERR loops
+  // (which previously crashed the panic handler and rebooted the device).
+  if (commandUpper.startsWith(F("DEPOSIT"))) {
+    Serial.println(F("OK DEPOSIT (no-op; insert bill into acceptor)"));
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
@@ -3287,6 +3325,7 @@ void handleUnoLine(const String& line) {
   if (line.startsWith(F("DONE motor="))) {
     unoOnline = true;
     remoteTaskActive = false;
+    remoteTaskSentMs = 0;
     if (taskCount > 0 && taskQueue[0].motor >= 1 && taskQueue[0].motor <= 3) {
       popQueueFront();
     }
@@ -3295,6 +3334,7 @@ void handleUnoLine(const String& line) {
   if (line.startsWith(F("ERR motor=")) || line == F("OK STOP")) {
     unoOnline = true;
     remoteTaskActive = false;
+    remoteTaskSentMs = 0;
     if (taskCount > 0 && taskQueue[0].motor >= 1 && taskQueue[0].motor <= 3) {
       popQueueFront();
     }
@@ -3406,6 +3446,7 @@ void setup() {
 
   UnoSerial.print('@');
   UnoSerial.println(F("PING"));
+  Serial.println(F(">UNO>@PING"));
 }
 
 void loop() {
@@ -3428,6 +3469,22 @@ void loop() {
   serviceElevatorPark();
   serviceLiftHardLimits();
   serviceLocalMotor4();
+  // Uno watchdog: if a DISPENSE was sent and no DONE/ERR came back within
+  // DISPENSE_TIMEOUT_MS, log + clear so subsequent tasks can be sent.
+  if (remoteTaskActive && remoteTaskSentMs > 0 &&
+      millis() - remoteTaskSentMs > DISPENSE_TIMEOUT_MS) {
+    Serial.print(F("WARN uno timeout motor="));
+    Serial.print(remoteTaskMotor);
+    Serial.print(F(" count="));
+    Serial.print(remoteTaskCount);
+    Serial.print(F(" elapsedMs="));
+    Serial.println(millis() - remoteTaskSentMs);
+    remoteTaskActive = false;
+    remoteTaskSentMs = 0;
+    if (taskCount > 0 && taskQueue[0].motor == remoteTaskMotor) {
+      popQueueFront();
+    }
+  }
   startNextQueuedTask();
   servicePendingWithdraw();
   serviceWithdrawJob();

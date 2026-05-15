@@ -4,6 +4,13 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyPassword } from '@/lib/password'
 
+// Single-tenant lockdown. Only usernames in this allowlist may log in.
+// Override at deploy time with env var: ALLOWED_USERNAMES="matt,james,foo"
+const ALLOWED_USERNAMES = (process.env.ALLOWED_USERNAMES ?? 'matt,james')
+  .split(',')
+  .map((u) => u.trim().toLowerCase())
+  .filter(Boolean)
+
 export async function POST(request: Request) {
   let body: unknown
   try {
@@ -19,6 +26,11 @@ export async function POST(request: Request) {
 
   if (!username || !password || (role !== 'kid' && role !== 'parent')) {
     return NextResponse.json({ error: 'Invalid credentials' }, { status: 400 })
+  }
+
+  if (!ALLOWED_USERNAMES.includes(username)) {
+    // Generic message so we don't leak which usernames exist.
+    return NextResponse.json({ error: 'Incorrect username or password' }, { status: 401 })
   }
 
   const account = await prisma.account.findUnique({ where: { username } })
