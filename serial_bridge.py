@@ -9,8 +9,8 @@ from serial.tools import list_ports
 # Set CASH_SERIAL_PORT env var to override, e.g. CASH_SERIAL_PORT=COM8
 COM_PORT = os.getenv("CASH_SERIAL_PORT", "COM6")
 BAUD_RATE = 115200
-DEPOSIT_API  = "https://cash-app-production-458e.up.railway.app/api/deposit"
-COMMAND_API  = "https://cash-app-production-458e.up.railway.app/api/command"
+DEPOSIT_API  = "https://cashmv.up.railway.app/api/deposit"
+COMMAND_API  = "https://cashmv.up.railway.app/api/command"
 COMMAND_POLL_INTERVAL = 0.5  # seconds between command polls
 
 # Accept only canonical deposit tag lines from firmware.

@@ -214,9 +214,9 @@ constexpr char WIFI_PASSWORD[] = "CASH12345!";
 // Updated at runtime by the SETWIFI command from the dashboard.
 String runtimeWifiSsid = WIFI_SSID;
 String runtimeWifiPassword = WIFI_PASSWORD;
-constexpr char DEPOSIT_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/deposit";
-constexpr char COMMAND_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/command";
-constexpr char DEVICE_STATUS_API_URL[] = "https://cash-app-production-458e.up.railway.app/api/device/status";
+constexpr char DEPOSIT_API_URL[] = "https://cashmv.up.railway.app/api/deposit";
+constexpr char COMMAND_API_URL[] = "https://cashmv.up.railway.app/api/command";
+constexpr char DEVICE_STATUS_API_URL[] = "https://cashmv.up.railway.app/api/device/status";
 constexpr unsigned long COMMAND_POLL_MS = 10000;
 constexpr unsigned long COMMAND_POLL_RETRY_MS = 15000;
 constexpr uint16_t COMMAND_HTTP_TIMEOUT_MS = 5000;
