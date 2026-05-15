@@ -3283,6 +3283,29 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  // PCATEST sweeps every PCA9685 channel (0..6) one at a time so a human can
+  // visually confirm whether each servo physically moves. Use this to diagnose
+  // dead V+ rail / loose connectors / bad servos. Output is verbose on Serial.
+  if (commandUpper.equals(F("PCATEST"))) {
+    Serial.println(F("PCATEST START (7 channels)"));
+    for (uint8_t ch = 0; ch < SERVO_CHANNEL_COUNT; ch++) {
+      Serial.print(F("PCATEST CH=")); Serial.print(ch);
+      Serial.println(F(" -> 0deg"));
+      setServoAngle(ch, 0);
+      delay(800);
+      Serial.print(F("PCATEST CH=")); Serial.print(ch);
+      Serial.println(F(" -> 180deg"));
+      setServoAngle(ch, 180);
+      delay(800);
+      Serial.print(F("PCATEST CH=")); Serial.print(ch);
+      Serial.println(F(" -> 90deg (neutral)"));
+      setServoAngle(ch, 90);
+      delay(500);
+    }
+    Serial.println(F("PCATEST DONE (if nothing moved -> check V+ supply / common GND)"));
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
