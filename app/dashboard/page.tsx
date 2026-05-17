@@ -2746,9 +2746,13 @@ export default function DashboardPage() {
             <p className="font-inter text-gray-700">{withdrawProgress.message}</p>
 
             {withdrawProgress.phase === 'dispensing' && (
-              <div className="rounded-xl bg-blue-50 px-4 py-3 font-inter text-blue-800">
-                <p className="text-sm">Estimated time remaining</p>
-                <p className="text-4xl font-sora font-black">{withdrawProgress.etaRemaining}s</p>
+              <div className="rounded-xl bg-blue-50 px-4 py-6 font-inter text-blue-800">
+                <p className="text-sm mb-3">Dispensing your cash</p>
+                <div className="flex items-center justify-center gap-2" aria-label="Dispensing">
+                  <span className="block w-3 h-3 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="block w-3 h-3 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="block w-3 h-3 rounded-full bg-blue-600 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
               </div>
             )}
 

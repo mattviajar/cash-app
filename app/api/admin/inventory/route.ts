@@ -144,6 +144,34 @@ export async function GET(request: Request) {
   return NextResponse.json(payload)
 }
 
+const INVENTORY_FIELDS = [
+  'bill20',
+  'bill50',
+  'bill100',
+  'bill500',
+  'bill1000',
+  'coin1',
+  'coin5',
+  'coin10',
+  'coin20',
+] as const
+
+type InventoryField = (typeof INVENTORY_FIELDS)[number]
+
+function pickInventoryUpdates(input: Record<string, unknown>): Partial<Record<InventoryField, number>> {
+  const out: Partial<Record<InventoryField, number>> = {}
+  for (const field of INVENTORY_FIELDS) {
+    const raw = input[field]
+    if (raw === undefined || raw === null) continue
+    const n = typeof raw === 'number' ? raw : Number(raw)
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+      throw new Error(`Invalid value for ${field}: ${raw}`)
+    }
+    out[field] = n
+  }
+  return out
+}
+
 export async function POST(request: Request) {
   const body = await request.json()
 
@@ -164,6 +192,26 @@ export async function POST(request: Request) {
     })
 
     return NextResponse.json({ status: 'reset complete' })
+  }
+
+  // Set absolute counts for any subset of denominations.
+  // Body: { "action": "set", "bill20": 5, "bill50": 5, ... }
+  if (body.action === 'set') {
+    let updates: Partial<Record<InventoryField, number>>
+    try {
+      updates = pickInventoryUpdates(body as Record<string, unknown>)
+    } catch (err) {
+      return NextResponse.json({ error: (err as Error).message }, { status: 400 })
+    }
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: 'No inventory fields provided' }, { status: 400 })
+    }
+    const inventory = await prisma.machineInventory.upsert({
+      where: { id: 1 },
+      create: { id: 1, ...updates },
+      update: updates,
+    })
+    return NextResponse.json({ status: 'set complete', inventory })
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

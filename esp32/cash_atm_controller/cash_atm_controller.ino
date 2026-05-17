@@ -3,6 +3,7 @@
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <ESP32Servo.h>
 
 namespace {
 
@@ -13,7 +14,12 @@ constexpr uint8_t UNO_TX_PIN = 5;  // moved off GPIO17 (suspect dead) to GPIO5
 constexpr bool STEPPERS_ENABLED = true;
 constexpr bool SERVOS_ENABLED = true;
 constexpr bool MOTION_ARMED_DEFAULT = true;
-constexpr bool AUTO_LIFT_TO_IR5_1_ON_BOOT = true;
+// IR5 sensors removed; their GPIOs (13/25/26/33/34) are now used for direct servo PWM.
+// Lift-to-IR5 sequences depend on those sensors, so disable the auto sequence at boot.
+constexpr bool AUTO_LIFT_TO_IR5_1_ON_BOOT = false;
+// Master switch: when false, all IR5 sensor pin reads are skipped and pinMode
+// for IR5_PINS is NOT called (those GPIOs are now servo outputs).
+constexpr bool IR5_SENSORS_ENABLED = false;
 constexpr bool AUTO_LIFT_TO_BOTTOM_ON_BOOT = false;
 constexpr bool AUTO_BILL_ROUTE_ENABLED = true;
 constexpr bool ACCEPTORS_CONNECTED = true;
@@ -39,7 +45,7 @@ constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
 constexpr unsigned long DISPENSE_TIMEOUT_MS = 12000;
 constexpr unsigned long STATUS_PRINT_MS = 1000;
 constexpr bool STATUS_VERBOSE_LOG = false;
-constexpr unsigned long PULSE_MIN_EDGE_GAP_MS = 20;
+constexpr unsigned long PULSE_MIN_EDGE_GAP_MS = 20;  // Polled-loop default; bill ISR uses its own value below.
 constexpr unsigned long PULSE_MIN_WIDTH_MS = 15;
 constexpr unsigned long PULSE_MAX_WIDTH_MS = 350;
 constexpr unsigned long COIN_IDLE_GAP_MS = 500;  // Increased from 250 for noise tolerance
@@ -59,10 +65,29 @@ constexpr uint8_t IR5_PINS[] = {34, 33, 25, 13, 26}; // IR5-4=GPIO13, IR5-5=GPIO
 constexpr uint8_t SERVO_CHANNEL_COUNT = 7;
 constexpr uint16_t SERVO_PWM_MIN = 110;
 constexpr uint16_t SERVO_PWM_MAX = 510;
+// Legacy PCA9685 constants kept so old code paths still compile, but the chip
+// is no longer used. All 7 channels are now driven directly from ESP32 GPIOs
+// via the ESP32Servo library.
 constexpr uint8_t PCA9685_ADDRESS = 0x40;
 constexpr uint8_t PCA9685_MODE1 = 0x00;
 constexpr uint8_t PCA9685_PRESCALE = 0xFE;
 constexpr uint8_t PCA9685_LED0_ON_L = 0x06;
+
+// Direct-GPIO pin map for the 7 servo channels (replaces PCA9685 channel 0..6).
+// CH0..CH4 = storage spinners 1..5, CH5 = elevator lift, CH6 = output spinner.
+constexpr uint8_t SERVO_GPIO_PINS[SERVO_CHANNEL_COUNT] = {
+  13,  // CH0 storage spinner 1
+  25,  // CH1 storage spinner 2
+  26,  // CH2 storage spinner 3
+  33,  // CH3 storage spinner 4
+  21,  // CH4 storage spinner 5 (was I2C SDA)
+  22,  // CH5 elevator lift     (was I2C SCL)
+  4    // CH6 output spinner
+};
+constexpr int SERVO_PULSE_MIN_US = 500;   // matches angle 0
+constexpr int SERVO_PULSE_MAX_US = 2500;  // matches angle 180
+Servo channelServos[SERVO_CHANNEL_COUNT];
+bool channelServoAttached[SERVO_CHANNEL_COUNT] = {false, false, false, false, false, false, false};
 
 // PCA9685 channel assignment from your thesis hardware.
 constexpr uint8_t SPINNER_CHANNEL_MIN = 0;   // CH0..CH4 storage spinner servos
@@ -81,7 +106,7 @@ constexpr uint8_t STORAGE_FORWARD_CMD = SPINNER_RUN_CMD;
 constexpr uint8_t STORAGE_BACKWARD_CMD = SPINNER_WITHDRAW_CMD;
 
 uint8_t storageChannelMap[STORAGE_SLOT_COUNT] = {0, 1, 2, 3, 4};
-bool storageDirectionInverted[STORAGE_SLOT_COUNT] = {true, false, false, false, false};
+bool storageDirectionInverted[STORAGE_SLOT_COUNT] = {false, true, true, true, true};
 bool ir5ActiveLow[5] = {ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW, ACTIVE_LOW};
 int8_t ir5PreferredSlot = 0;
 
@@ -147,12 +172,23 @@ constexpr unsigned long ELEVATOR_CATCH_SLOW_UP_MS = 1300;
 constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 180;
 constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 150;
 constexpr unsigned long ELEVATOR_LIFT_DIRECTION_TEST_MS = 2000;
-// Withdrawal timing
-constexpr unsigned long WITHDRAW_SPIN_MS = 1500;           // time to eject one bill (forward)
-constexpr unsigned long WITHDRAW_REVERSE_MS = 500;         // brief reverse to settle next bill back into position
+// Withdrawal timing -- per-bill cycle: forward 2s -> backward 1s (matches
+// the standalone spinner1_gpio13_test profile validated on hardware).
+constexpr unsigned long WITHDRAW_SPIN_MS = 2500;           // time to eject one bill (forward)
+constexpr unsigned long WITHDRAW_REVERSE_MS = 1000;        // reverse pulse to settle next bill back into position
 constexpr unsigned long WITHDRAW_INTER_BILL_GAP_MS = 600;  // pause between bills
 constexpr unsigned long WITHDRAW_TOTAL_TIMEOUT_MS = 120000; // 2-min safety timeout
 constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000;        // 15-min motor safety cap
+
+// Per-slot extra forward time (slot index 0..4 == storage slot 1..5).
+// Slot 5 needs +1s of forward push compared to the others.
+constexpr unsigned long WITHDRAW_SPIN_EXTRA_MS[STORAGE_SLOT_COUNT] = {0, 0, 0, 0, 1000};
+inline unsigned long withdrawSpinMsForSlot(uint8_t slot) {
+  if (slot >= 1 && slot <= STORAGE_SLOT_COUNT) {
+    return WITHDRAW_SPIN_MS + WITHDRAW_SPIN_EXTRA_MS[slot - 1];
+  }
+  return WITHDRAW_SPIN_MS;
+}
 
 constexpr uint8_t HALF_STEP[8][4] = {
   {1, 0, 0, 0},
@@ -227,6 +263,43 @@ constexpr unsigned long COMMAND_SKIP_LOG_MS = 5000;
 
 struct MotorState {
   int sequenceIndex;
+};
+
+// Migration path: run DISPENSE motors 1..4 directly on ESP32 using
+// continuous-rotation servos (360 deg) instead of Uno steppers.
+// Keep disabled by default for dual-ESP architecture (main ESP32 + coin ESP32).
+// Set true only when this SAME board directly drives the coin-dispense servos.
+constexpr bool LOCAL_COIN_SERVO_MODE = false;
+constexpr uint8_t DISPENSE_MOTOR_COUNT = 4;
+constexpr uint8_t INVALID_GPIO_PIN = 255;
+
+struct CoinServoConfig {
+  uint8_t servoPin;
+  uint8_t irPin;
+  bool irActiveLow;
+  int forwardUs;
+  int reverseUs;
+  int stopUs;
+  unsigned long startupSettleMs;
+  unsigned long timeoutMs;
+};
+
+// TODO: Replace INVALID_GPIO_PIN with your actual wiring.
+CoinServoConfig coinServoConfig[DISPENSE_MOTOR_COUNT] = {
+  {INVALID_GPIO_PIN, INVALID_GPIO_PIN, true, 1700, 1300, 1500, 300, JOB_MAX_RUNTIME_MS},
+  {INVALID_GPIO_PIN, INVALID_GPIO_PIN, true, 1700, 1300, 1500, 300, JOB_MAX_RUNTIME_MS},
+  {INVALID_GPIO_PIN, INVALID_GPIO_PIN, true, 1700, 1300, 1500, 300, JOB_MAX_RUNTIME_MS},
+  {INVALID_GPIO_PIN, INVALID_GPIO_PIN, true, 1700, 1300, 1500, 300, JOB_MAX_RUNTIME_MS},
+};
+
+struct LocalCoinServoJob {
+  bool active;
+  uint8_t motor;
+  uint8_t requestedCount;
+  uint8_t dispensedCount;
+  bool sensorArmed;
+  unsigned long startedMs;
+  unsigned long settleUntilMs;
 };
 
 constexpr unsigned long M4_FORWARD_RUN_MS  = 14000;
@@ -322,6 +395,9 @@ uint8_t taskCount = 0;
 
 MotorState motor4 = {};
 LocalDispenseJob motor4Job = {};
+Servo coinDispenseServos[DISPENSE_MOTOR_COUNT];
+bool coinDispenseServoAttached[DISPENSE_MOTOR_COUNT] = {false, false, false, false};
+LocalCoinServoJob coinServoJob = {};
 PulseInput coinInput = {COIN_PIN, "coin", true, false, 0, 0, COIN_IDLE_GAP_MS, false, 0};
 // Slow pulse mode can stretch high-time to ~300ms between falling edges.
 // Use a larger idle gap so a single bill's pulse train is grouped correctly.
@@ -401,44 +477,60 @@ void stopElevatorPark();
 void startElevatorPark(uint8_t slot);
 void handleUsbCommand(String command);
 void handleUnoLine(const String& line);
+bool startLocalCoinServoJob(uint8_t motor, uint8_t count);
+void serviceLocalCoinServoJob();
 
-void pcaWriteRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(PCA9685_ADDRESS);
-  Wire.write(reg);
-  Wire.write(value);
-  Wire.endTransmission();
+// ===== Direct-GPIO servo backend (replaces PCA9685) =====
+// The PCA chip is no longer required. All 7 channels (0..6) are driven by
+// ESP32 LEDC PWM via the ESP32Servo library on the GPIOs in SERVO_GPIO_PINS.
+// The original pcaSetPwm(channel, 0, 0) idiom is preserved as "detach servo".
+void attachChannelServo(uint8_t channel) {
+  if (channel >= SERVO_CHANNEL_COUNT) return;
+  if (channelServoAttached[channel]) return;
+  channelServos[channel].setPeriodHertz(50);
+  channelServos[channel].attach(SERVO_GPIO_PINS[channel], SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
+  channelServoAttached[channel] = true;
 }
 
-uint8_t pcaReadRegister(uint8_t reg) {
-  Wire.beginTransmission(PCA9685_ADDRESS);
-  Wire.write(reg);
-  Wire.endTransmission(false);
-  Wire.requestFrom(static_cast<int>(PCA9685_ADDRESS), 1);
-  return Wire.available() ? Wire.read() : 0;
+void detachChannelServo(uint8_t channel) {
+  if (channel >= SERVO_CHANNEL_COUNT) return;
+  if (!channelServoAttached[channel]) return;
+  channelServos[channel].writeMicroseconds(1500); // neutral/stop briefly
+  channelServos[channel].detach();
+  channelServoAttached[channel] = false;
 }
 
+// Compatibility shims so existing code that called pcaWriteRegister/pcaReadRegister
+// still compiles. They now do nothing (no PCA chip).
+void pcaWriteRegister(uint8_t /*reg*/, uint8_t /*value*/) {}
+uint8_t pcaReadRegister(uint8_t /*reg*/) { return 0; }
+
+// Compatibility shim: pcaSetPwm(channel, 0, 0) is the existing idiom for
+// "disable PWM on this channel". Map it to detaching the servo. Other counts
+// are handled via setServoAngle() instead.
 void pcaSetPwm(uint8_t channel, uint16_t onCount, uint16_t offCount) {
-  const uint8_t base = PCA9685_LED0_ON_L + 4 * channel;
-  Wire.beginTransmission(PCA9685_ADDRESS);
-  Wire.write(base);
-  Wire.write(static_cast<uint8_t>(onCount & 0xFF));
-  Wire.write(static_cast<uint8_t>(onCount >> 8));
-  Wire.write(static_cast<uint8_t>(offCount & 0xFF));
-  Wire.write(static_cast<uint8_t>(offCount >> 8));
-  Wire.endTransmission();
+  if (channel >= SERVO_CHANNEL_COUNT) return;
+  if (onCount == 0 && offCount == 0) {
+    detachChannelServo(channel);
+  }
 }
+
+// No PCA chip to probe anymore — always report present so existing boot gates pass.
+bool pcaIsPresent() { return true; }
 
 void pcaInit50Hz() {
-  pcaWriteRegister(PCA9685_MODE1, 0x10);
-  pcaWriteRegister(PCA9685_PRESCALE, 121);
-  pcaWriteRegister(PCA9685_MODE1, 0x20);
-  delay(5);
-  pcaWriteRegister(PCA9685_MODE1, pcaReadRegister(PCA9685_MODE1) | 0xA1);
+  // No PCA: pre-attach all channels so initial setServoAngle calls don't have
+  // any first-write latency. Each servo is held at 1500us (stop) until a real
+  // command is issued.
+  for (uint8_t ch = 0; ch < SERVO_CHANNEL_COUNT; ++ch) {
+    attachChannelServo(ch);
+    channelServos[ch].writeMicroseconds(1500);
+  }
 }
 
 void pcaAllChannelsOff() {
-  for (uint8_t channel = 0; channel < 16; ++channel) {
-    pcaSetPwm(channel, 0, 0);
+  for (uint8_t ch = 0; ch < SERVO_CHANNEL_COUNT; ++ch) {
+    detachChannelServo(ch);
   }
 }
 
@@ -513,6 +605,43 @@ int8_t currentIr5FaceSlot() {
 bool isM4IrDetected() {
   const int raw = digitalRead(M4_IR_PIN);
   return raw != m4IrBaselineLevel;
+}
+
+bool isCoinServoConfigured(uint8_t motorIndex) {
+  if (motorIndex >= DISPENSE_MOTOR_COUNT) {
+    return false;
+  }
+  return coinServoConfig[motorIndex].servoPin != INVALID_GPIO_PIN &&
+         coinServoConfig[motorIndex].irPin != INVALID_GPIO_PIN;
+}
+
+void attachCoinServo(uint8_t motorIndex) {
+  if (motorIndex >= DISPENSE_MOTOR_COUNT || coinDispenseServoAttached[motorIndex]) {
+    return;
+  }
+  const CoinServoConfig& cfg = coinServoConfig[motorIndex];
+  coinDispenseServos[motorIndex].setPeriodHertz(50);
+  coinDispenseServos[motorIndex].attach(cfg.servoPin, SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US);
+  coinDispenseServoAttached[motorIndex] = true;
+}
+
+void stopCoinServoMotor(uint8_t motorIndex) {
+  if (motorIndex >= DISPENSE_MOTOR_COUNT) {
+    return;
+  }
+  if (!coinDispenseServoAttached[motorIndex]) {
+    return;
+  }
+  coinDispenseServos[motorIndex].writeMicroseconds(coinServoConfig[motorIndex].stopUs);
+}
+
+bool isCoinServoIrDetected(uint8_t motorIndex) {
+  if (motorIndex >= DISPENSE_MOTOR_COUNT || !isCoinServoConfigured(motorIndex)) {
+    return false;
+  }
+  const CoinServoConfig& cfg = coinServoConfig[motorIndex];
+  const int raw = digitalRead(cfg.irPin);
+  return cfg.irActiveLow ? (raw == LOW) : (raw == HIGH);
 }
 
 void writeMotor4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
@@ -803,10 +932,12 @@ void pollRemoteCommands() {
   }
 
   // Avoid extra network activity while local motion tasks are active.
-  if (motor4Job.active || withdrawJob.active || billRoute.active) {
+  if (coinServoJob.active || motor4Job.active || withdrawJob.active || billRoute.active) {
     if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
       lastCommandSkipLogMs = nowMs;
-      Serial.print(F("CMD POLL skip=motion-active m4="));
+      Serial.print(F("CMD POLL skip=motion-active local="));
+      Serial.print(coinServoJob.active ? F("1") : F("0"));
+      Serial.print(F(" m4="));
       Serial.print(motor4Job.active ? F("1") : F("0"));
       Serial.print(F(" withdraw="));
       Serial.print(withdrawJob.active ? F("1") : F("0"));
@@ -958,6 +1089,15 @@ void pollRemoteCommands() {
   }
 }
 
+// Slow continuous-rotation pulse widths used by the storage spinners
+// (channels 0..4) so all 5 spinners run at the same gentle speed as the
+// validated spinner-1 standalone test (forward=1300us, reverse=1700us,
+// stop=1500us). Lift (CH5) and output spinner (CH6) keep the raw angle
+// path because they use intermediate angles for tuning.
+constexpr int STORAGE_SPINNER_FORWARD_US = 1300;
+constexpr int STORAGE_SPINNER_REVERSE_US = 1700;
+constexpr int STORAGE_SPINNER_STOP_US    = 1500;
+
 void setServoAngle(uint8_t channel, uint8_t angle) {
   if (!SERVOS_ENABLED) {
     return;
@@ -965,14 +1105,40 @@ void setServoAngle(uint8_t channel, uint8_t angle) {
   if (!motionArmed) {
     return;
   }
-  if (channel >= 16) {
+  if (channel >= SERVO_CHANNEL_COUNT) {
     return;
   }
   if (angle > 180) {
     angle = 180;
   }
-  const uint16_t pulse = SERVO_PWM_MIN + ((SERVO_PWM_MAX - SERVO_PWM_MIN) * angle) / 180;
-  pcaSetPwm(channel, 0, pulse);
+  attachChannelServo(channel);
+  // Storage spinners (CH0..CH4): translate logical angles into the slow
+  // pulse widths so all spinners match spinner 1's speed.
+  if (channel < STORAGE_SLOT_COUNT) {
+    int us = STORAGE_SPINNER_STOP_US;
+    if (angle == SPINNER_RUN_CMD) {            // 180 -> forward
+      us = STORAGE_SPINNER_FORWARD_US;
+    } else if (angle == SPINNER_WITHDRAW_CMD) { // 0 -> reverse
+      us = STORAGE_SPINNER_REVERSE_US;
+    } else if (angle == SERVO_STOP_CMD) {       // 90 -> stop
+      us = STORAGE_SPINNER_STOP_US;
+    } else {
+      // Linear interpolation for STORAGE <slot> <cmd0..180> raw values:
+      // 0 -> REVERSE_US, 90 -> STOP_US, 180 -> FORWARD_US
+      if (angle < SERVO_STOP_CMD) {
+        us = STORAGE_SPINNER_STOP_US +
+             ((int)(STORAGE_SPINNER_REVERSE_US - STORAGE_SPINNER_STOP_US) *
+              (int)(SERVO_STOP_CMD - angle)) / (int)SERVO_STOP_CMD;
+      } else {
+        us = STORAGE_SPINNER_STOP_US +
+             ((int)(STORAGE_SPINNER_FORWARD_US - STORAGE_SPINNER_STOP_US) *
+              (int)(angle - SERVO_STOP_CMD)) / (int)SERVO_STOP_CMD;
+      }
+    }
+    channelServos[channel].writeMicroseconds(us);
+    return;
+  }
+  channelServos[channel].write(angle);
 }
 
 void homeServos() {
@@ -1294,13 +1460,13 @@ void runStorageTest(uint8_t slot) {
   Serial.print(slot + 1);
   Serial.println(F(" FORWARD"));
   setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_RUN_CMD));
-  delay(STORAGE_TEST_SPIN_MS);
+  delay(withdrawSpinMsForSlot(slot + 1));
 
   Serial.print(F("STORAGETEST slot="));
   Serial.print(slot + 1);
   Serial.println(F(" BACKWARD"));
   setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_WITHDRAW_CMD));
-  delay(STORAGE_TEST_SPIN_MS);
+  delay(WITHDRAW_REVERSE_MS);
 
   stopStorageMotor(slot);
   Serial.print(F("STORAGETEST slot="));
@@ -1445,6 +1611,16 @@ void startNextQueuedTask() {
   }
 
   const QueueTask nextTask = taskQueue[0];
+  if (LOCAL_COIN_SERVO_MODE) {
+    if (coinServoJob.active) {
+      return;
+    }
+    if (!startLocalCoinServoJob(nextTask.motor, nextTask.count)) {
+      popQueueFront();
+    }
+    return;
+  }
+
   if (nextTask.motor == 4) {
     startLocalMotor4(nextTask.count);
     return;
@@ -1473,8 +1649,16 @@ void startNextQueuedTask() {
 
 void stopAllDispense() {
   taskCount = 0;
+  coinServoJob = {};
   motor4Job = {};
   remoteTaskActive = false;
+  for (uint8_t index = 0; index < DISPENSE_MOTOR_COUNT; ++index) {
+    stopCoinServoMotor(index);
+  }
+  if (LOCAL_COIN_SERVO_MODE) {
+    Serial.println(F("OK STOP"));
+    return;
+  }
   releaseMotor4();
   UnoSerial.print('@');
   UnoSerial.println(F("STOP"));
@@ -1839,6 +2023,17 @@ void printStatus() {
   Serial.print(taskCount);
   Serial.print(F(" remote="));
   Serial.print(remoteTaskActive ? F("1") : F("0"));
+  Serial.print(F(" local="));
+  if (coinServoJob.active) {
+    Serial.print(F("m"));
+    Serial.print(coinServoJob.motor);
+    Serial.print(':');
+    Serial.print(coinServoJob.dispensedCount);
+    Serial.print('/');
+    Serial.print(coinServoJob.requestedCount);
+  } else {
+    Serial.print(F("idle"));
+  }
   Serial.print(F(" m4="));
   if (motor4Job.active) {
     Serial.print(motor4Job.dispensedCount);
@@ -2122,7 +2317,11 @@ void serviceLiftToIr51() {
 }
 
 void finalizePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
-  const float amount = mapPulseCount(map, length, input.pulseCount);
+  float amount = mapPulseCount(map, length, input.pulseCount);
+  // Bill acceptor reports double the actual cash value; halve before posting.
+  if (amount > 0.0f && input.name[0] == 'b') {
+    amount = amount / 2.0f;
+  }
   if (amount > 0.0f) {
     postDeposit(amount, input.name, input.pulseCount);
     if (input.name[0] == 'b') {
@@ -2147,7 +2346,81 @@ void finalizePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
   input.pulseCount = 0;
 }
 
+// --- Bill pin: hardware-interrupt edge capture --------------------------
+// The bill acceptor's pulse stream can be missed when loop() is busy with
+// HTTP work or motor delay() calls. Capture every edge in an ISR and only
+// run the final idle-gap commit from the main loop.
+volatile uint8_t       billIsrPulseCount     = 0;
+volatile bool          billIsrPending        = false;
+volatile unsigned long billIsrLastEdgeMs     = 0;
+volatile unsigned long billIsrPulseStartedMs = 0;
+volatile bool          billIsrPulseActive    = false;
+volatile bool          billIsrLastLevel      = true; // pulled-up idle = HIGH
+
+void IRAM_ATTR onBillPinChange() {
+  const bool level = (digitalRead(BILL_PIN) == HIGH);
+  const unsigned long nowMs = millis();
+
+  const bool startEdge = PULSE_ACTIVE_LOW
+                            ? (billIsrLastLevel && !level)
+                            : (!billIsrLastLevel && level);
+  const bool endEdge   = PULSE_ACTIVE_LOW
+                            ? (!billIsrLastLevel && level)
+                            : (billIsrLastLevel && !level);
+
+  if (startEdge) {
+    billIsrPulseActive = true;
+    billIsrPulseStartedMs = nowMs;
+  }
+
+  if (endEdge && billIsrPulseActive) {
+    const unsigned long widthMs = nowMs - billIsrPulseStartedMs;
+    billIsrPulseActive = false;
+    if (widthMs >= PULSE_MIN_WIDTH_MS &&
+        widthMs <= PULSE_MAX_WIDTH_MS &&
+        (nowMs - billIsrLastEdgeMs) > PULSE_MIN_EDGE_GAP_MS) {
+      ++billIsrPulseCount;
+      billIsrPending = true;
+      billIsrLastEdgeMs = nowMs;
+    }
+  }
+
+  billIsrLastLevel = level;
+}
+
 void servicePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
+  // Bill input is fully ISR-driven; the loop only commits after idle gap.
+  if (input.pin == BILL_PIN) {
+    const unsigned long nowMs = millis();
+    // Stuck-active recovery (matches polled path).
+    if (billIsrPulseActive &&
+        (nowMs - billIsrPulseStartedMs) > (PULSE_MAX_WIDTH_MS + 100)) {
+      noInterrupts();
+      billIsrPulseActive = false;
+      interrupts();
+    }
+    // Atomic snapshot.
+    noInterrupts();
+    const bool          pending  = billIsrPending;
+    const uint8_t       count    = billIsrPulseCount;
+    const unsigned long lastEdge = billIsrLastEdgeMs;
+    interrupts();
+
+    if (pending && (nowMs - lastEdge) >= input.idleGapMs) {
+      // Sync into the PulseInput struct so finalize prints/logs work.
+      input.pulseCount = count;
+      input.pending = true;
+      input.lastEdgeMs = lastEdge;
+      finalizePulseInput(input, map, length);
+      // Reset ISR state to mirror the finalize.
+      noInterrupts();
+      billIsrPending = false;
+      billIsrPulseCount = 0;
+      interrupts();
+    }
+    return;
+  }
+
   const bool level = (digitalRead(input.pin) == HIGH);
   const unsigned long nowMs = millis();
 
@@ -2272,6 +2545,106 @@ void failLocalMotor4(const __FlashStringHelper* reason) {
   Serial.print(F("ERR motor=4 reason="));
   Serial.println(reason);
   popQueueFront();
+}
+
+void finishLocalCoinServoJob() {
+  const uint8_t motor = coinServoJob.motor;
+  const uint8_t dispensed = coinServoJob.dispensedCount;
+  coinServoJob = {};
+  if (motor >= 1 && motor <= DISPENSE_MOTOR_COUNT) {
+    stopCoinServoMotor(motor - 1);
+  }
+  Serial.print(F("DONE motor="));
+  Serial.print(motor);
+  Serial.print(F(" count="));
+  Serial.println(dispensed);
+  popQueueFront();
+}
+
+void failLocalCoinServoJob(const __FlashStringHelper* reason) {
+  const uint8_t motor = coinServoJob.motor;
+  coinServoJob = {};
+  if (motor >= 1 && motor <= DISPENSE_MOTOR_COUNT) {
+    stopCoinServoMotor(motor - 1);
+  }
+  Serial.print(F("ERR motor="));
+  Serial.print(motor);
+  Serial.print(F(" reason="));
+  Serial.println(reason);
+  popQueueFront();
+}
+
+bool startLocalCoinServoJob(uint8_t motor, uint8_t count) {
+  if (motor < 1 || motor > DISPENSE_MOTOR_COUNT || count == 0) {
+    return false;
+  }
+
+  const uint8_t idx = motor - 1;
+  if (!isCoinServoConfigured(idx)) {
+    Serial.print(F("ERR motor="));
+    Serial.print(motor);
+    Serial.println(F(" reason=servo-not-configured"));
+    return false;
+  }
+
+  attachCoinServo(idx);
+  coinDispenseServos[idx].writeMicroseconds(coinServoConfig[idx].forwardUs);
+
+  coinServoJob.active = true;
+  coinServoJob.motor = motor;
+  coinServoJob.requestedCount = count;
+  coinServoJob.dispensedCount = 0;
+  coinServoJob.sensorArmed = !isCoinServoIrDetected(idx);
+  coinServoJob.startedMs = millis();
+  coinServoJob.settleUntilMs = coinServoJob.startedMs + coinServoConfig[idx].startupSettleMs;
+
+  Serial.print(F("OK DISPENSE motor="));
+  Serial.print(motor);
+  Serial.print(F(" count="));
+  Serial.println(count);
+  return true;
+}
+
+void serviceLocalCoinServoJob() {
+  if (!coinServoJob.active) {
+    return;
+  }
+
+  const uint8_t idx = coinServoJob.motor - 1;
+  const CoinServoConfig& cfg = coinServoConfig[idx];
+  const unsigned long nowMs = millis();
+
+  if (nowMs - coinServoJob.startedMs >= cfg.timeoutMs) {
+    failLocalCoinServoJob(F("timeout"));
+    return;
+  }
+
+  if (nowMs < coinServoJob.settleUntilMs) {
+    return;
+  }
+
+  const bool detected = isCoinServoIrDetected(idx);
+  if (!coinServoJob.sensorArmed) {
+    if (!detected) {
+      coinServoJob.sensorArmed = true;
+    }
+    return;
+  }
+
+  if (!detected) {
+    return;
+  }
+
+  ++coinServoJob.dispensedCount;
+  coinServoJob.sensorArmed = false;
+  Serial.print(F("EVENT motor="));
+  Serial.print(coinServoJob.motor);
+  Serial.print(F(" dispensed="));
+  Serial.println(coinServoJob.dispensedCount);
+
+  if (coinServoJob.dispensedCount >= coinServoJob.requestedCount) {
+    finishLocalCoinServoJob();
+  }
 }
 
 void serviceLocalMotor4() {
@@ -2459,6 +2832,7 @@ void servicePendingWithdraw() {
   if (withdrawJob.active) return;
   if (taskCount > 0) return;
   if (remoteTaskActive) return;
+  if (coinServoJob.active) return;
   if (motor4Job.active) return;
   if (billRoute.active) return;
 
@@ -2591,7 +2965,7 @@ void serviceWithdrawJob() {
       break;
     }
     case WD_SPIN_BILL: {
-      if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_SPIN_MS) {
+      if (nowMs - withdrawJob.stageStartedMs >= withdrawSpinMsForSlot(withdrawJob.currentSlot)) {
         // Reverse briefly so the next bill in the stack settles back into position.
         setServoAngle(
           storageChannelForSlot(withdrawJob.currentSlot),
@@ -3306,6 +3680,99 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  // I2CDIAG reads the idle voltage state of SDA and SCL with internal pullups
+  // enabled. This proves whether the bus is electrically alive *before* any
+  // I2C traffic. Expected idle: BOTH HIGH. If either reads LOW, that line is
+  // shorted to GND or held by a dead device. If both read HIGH but I2CSCAN
+  // still finds nothing -> the chip is unpowered (VCC=0V) or fried.
+  if (commandUpper.equals(F("I2CDIAG"))) {
+    Wire.end();
+    delay(20);
+    const uint8_t SDA_PIN = 21;
+    const uint8_t SCL_PIN = 22;
+    // Float test (no pullups) - tells us if anything is actively driving the line
+    pinMode(SDA_PIN, INPUT);
+    pinMode(SCL_PIN, INPUT);
+    delay(5);
+    int sdaFloat = digitalRead(SDA_PIN);
+    int sclFloat = digitalRead(SCL_PIN);
+    // Pulled-up test - tells us if any wire is shorted to GND
+    pinMode(SDA_PIN, INPUT_PULLUP);
+    pinMode(SCL_PIN, INPUT_PULLUP);
+    delay(5);
+    int sdaPU = digitalRead(SDA_PIN);
+    int sclPU = digitalRead(SCL_PIN);
+    Serial.print(F("I2CDIAG float SDA=")); Serial.print(sdaFloat ? F("HIGH") : F("LOW"));
+    Serial.print(F(" SCL="));              Serial.println(sclFloat ? F("HIGH") : F("LOW"));
+    Serial.print(F("I2CDIAG pullup SDA=")); Serial.print(sdaPU ? F("HIGH") : F("LOW"));
+    Serial.print(F(" SCL="));              Serial.println(sclPU ? F("HIGH") : F("LOW"));
+    if (sdaPU == LOW && sclPU == LOW) {
+      Serial.println(F("I2CDIAG -> BOTH lines stuck LOW: SDA and SCL likely shorted to GND or PCA9685 fried holding bus low"));
+    } else if (sdaPU == LOW) {
+      Serial.println(F("I2CDIAG -> SDA stuck LOW: SDA wire shorted to GND or device holding it low"));
+    } else if (sclPU == LOW) {
+      Serial.println(F("I2CDIAG -> SCL stuck LOW: SCL wire shorted to GND or device holding it low"));
+    } else {
+      Serial.println(F("I2CDIAG -> bus electrically OK (both idle HIGH); if I2CSCAN still finds nothing, PCA9685 has no VCC or is dead"));
+    }
+    // Restore default I2C
+    Wire.end();
+    delay(20);
+    Wire.begin(21, 22);
+    return;
+  }
+
+  // I2CSCAN walks every I2C address 0x03..0x77 and reports which devices ACK.
+  // Use this to confirm the ESP32 can actually reach the PCA9685 (expected at 0x40).
+  // If 0x40 is missing -> SDA/SCL wiring, missing pullups, or dead PCA9685.
+  if (commandUpper.equals(F("I2CSCAN"))) {
+    auto runScan = [](const __FlashStringHelper* label, uint8_t sda, uint8_t scl, bool pullups) -> uint8_t {
+      Serial.print(F("I2CSCAN ")); Serial.print(label);
+      Serial.print(F(" SDA=")); Serial.print(sda);
+      Serial.print(F(" SCL=")); Serial.print(scl);
+      Serial.print(F(" pullups=")); Serial.println(pullups ? F("INTERNAL") : F("OFF"));
+      Wire.end();
+      delay(50);
+      if (pullups) {
+        pinMode(sda, INPUT_PULLUP);
+        pinMode(scl, INPUT_PULLUP);
+      }
+      Wire.begin(sda, scl);
+      Wire.setClock(100000);
+      delay(50);
+      uint8_t found = 0;
+      for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+          Serial.print(F("  FOUND 0x"));
+          if (addr < 16) Serial.print(F("0"));
+          Serial.println(addr, HEX);
+          found++;
+        }
+      }
+      Serial.print(F("  total=")); Serial.println(found);
+      return found;
+    };
+    uint8_t a = runScan(F("[A normal]"),   21, 22, false);
+    uint8_t b = runScan(F("[B pullups]"),  21, 22, true);
+    uint8_t c = runScan(F("[C swapped]"),  22, 21, true);
+    Serial.print(F("I2CSCAN SUMMARY normal=")); Serial.print(a);
+    Serial.print(F(" pullups=")); Serial.print(b);
+    Serial.print(F(" swapped=")); Serial.println(c);
+    if (a + b + c == 0) {
+      Serial.println(F("I2CSCAN ALL FAILED -> wires loose/broken or PCA9685 dead"));
+    } else if (c > 0 && a == 0 && b == 0) {
+      Serial.println(F("I2CSCAN -> SDA/SCL ARE SWAPPED in your wiring"));
+    } else if (b > 0 && a == 0) {
+      Serial.println(F("I2CSCAN -> board missing pullups; add 4.7k ohm SDA->VCC and SCL->VCC"));
+    }
+    // Restore default
+    Wire.end();
+    delay(20);
+    Wire.begin(21, 22);
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
@@ -3394,22 +3861,50 @@ void setup() {
   pinMode(M4_IR_PIN, INPUT);
   pinMode(BILL_PIN, INPUT_PULLUP);
   pinMode(COIN_PIN, INPUT_PULLUP);
-  for (uint8_t index = 0; index < 5; ++index) {
-    pinMode(IR5_PINS[index], INPUT_PULLUP);
-    const bool initial = isIr5RawDetected(index);
-    ir5RawLastState[index] = initial;
-    ir5StableState[index] = initial;
-    ir5RawChangedMs[index] = millis();
+  if (LOCAL_COIN_SERVO_MODE) {
+    for (uint8_t index = 0; index < DISPENSE_MOTOR_COUNT; ++index) {
+      if (coinServoConfig[index].irPin != INVALID_GPIO_PIN) {
+        pinMode(coinServoConfig[index].irPin, INPUT_PULLUP);
+      }
+    }
+  }
+  // Bill pin uses a hardware interrupt so pulses are not missed when loop()
+  // is busy with HTTP, motor delays, etc.
+  billIsrLastLevel = (digitalRead(BILL_PIN) == HIGH);
+  attachInterrupt(digitalPinToInterrupt(BILL_PIN), onBillPinChange, CHANGE);
+  if (IR5_SENSORS_ENABLED) {
+    for (uint8_t index = 0; index < 5; ++index) {
+      pinMode(IR5_PINS[index], INPUT_PULLUP);
+      const bool initial = isIr5RawDetected(index);
+      ir5RawLastState[index] = initial;
+      ir5StableState[index] = initial;
+      ir5RawChangedMs[index] = millis();
+    }
+  } else {
+    // IR5 sensors disabled: IR5 GPIOs (13/25/26/33) are now servo outputs.
+    // Mark all IR5 states as not-detected so any residual logic stays inert.
+    for (uint8_t index = 0; index < 5; ++index) {
+      ir5RawLastState[index] = false;
+      ir5StableState[index] = false;
+      ir5RawChangedMs[index] = millis();
+    }
   }
 
   releaseMotor4();
 
-  Wire.begin(21, 22);
-  pcaInit50Hz();
-  if (SERVOS_ENABLED && motionArmed) {
-    homeServos();
+  // PCA9685 removed; do not call Wire.begin(21,22) -- those pins are now servo
+  // PWM outputs (CH4 and CH5). pcaIsPresent() always returns true now.
+  const bool pcaOnlineAtBoot = pcaIsPresent();
+  if (pcaOnlineAtBoot) {
+    Serial.println(F("PCA9685 detected at 0x40"));
+    pcaInit50Hz();
+    if (SERVOS_ENABLED && motionArmed) {
+      homeServos();
+    } else {
+      pcaAllChannelsOff();
+    }
   } else {
-    pcaAllChannelsOff();
+    Serial.println(F("PCA9685 NOT FOUND on I2C (SDA=21 SCL=22) -> check VCC/GND/SDA/SCL wiring; servos disabled this boot"));
   }
 
   coinInput.lastLevel = (digitalRead(COIN_PIN) == HIGH);
@@ -3441,14 +3936,16 @@ void setup() {
   }
   printHelp();
 
-  if (AUTO_LIFT_TO_IR5_1_ON_BOOT && SERVOS_ENABLED && !billRoute.active) {
+  if (AUTO_LIFT_TO_IR5_1_ON_BOOT && SERVOS_ENABLED && !billRoute.active && pcaOnlineAtBoot) {
     motionArmed = true;
     pcaAllChannelsOff();
     startLiftToIr51Sequence(F("BOOT"));
     Serial.println(F("AUTO: LIFTTO1 requested"));
+  } else if (AUTO_LIFT_TO_IR5_1_ON_BOOT && SERVOS_ENABLED && !pcaOnlineAtBoot) {
+    Serial.println(F("AUTO: LIFTTO1 skipped (PCA9685 offline)"));
   }
 
-  if (AUTO_LIFT_TO_BOTTOM_ON_BOOT && SERVOS_ENABLED && !billRoute.active) {
+  if (AUTO_LIFT_TO_BOTTOM_ON_BOOT && SERVOS_ENABLED && !billRoute.active && pcaOnlineAtBoot) {
     motionArmed = true;
     pcaAllChannelsOff();
     Serial.println(F("AUTO: moving to bottom IR5-5"));
@@ -3491,10 +3988,11 @@ void loop() {
   serviceLiftToIr51();
   serviceElevatorPark();
   serviceLiftHardLimits();
+  serviceLocalCoinServoJob();
   serviceLocalMotor4();
   // Uno watchdog: if a DISPENSE was sent and no DONE/ERR came back within
   // DISPENSE_TIMEOUT_MS, log + clear so subsequent tasks can be sent.
-  if (remoteTaskActive && remoteTaskSentMs > 0 &&
+  if (!LOCAL_COIN_SERVO_MODE && remoteTaskActive && remoteTaskSentMs > 0 &&
       millis() - remoteTaskSentMs > DISPENSE_TIMEOUT_MS) {
     Serial.print(F("WARN uno timeout motor="));
     Serial.print(remoteTaskMotor);
