@@ -1983,7 +1983,7 @@ export default function DashboardPage() {
                     </p>
                     {!canParentChildWithdraw && parentChildWithdrawAmount !== '' && (
                       <p className="text-sm text-red-600 font-inter mt-2">
-                        Enter a valid amount not greater than the selected child's balance.
+                        Enter a valid amount not greater than the selected child balance.
                       </p>
                     )}
                   </div>
@@ -2360,7 +2360,7 @@ export default function DashboardPage() {
           <h4 className="text-lg font-sora font-bold text-blue-700 mb-3">👶 Create Kid Accounts</h4>
           <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 mb-4">
             <p className="text-sm text-blue-800 font-inter mb-4">
-              Create accounts for your children. They'll use these credentials to log in and access their savings dashboard.
+              Create accounts for your children. They will use these credentials to log in and access their savings dashboard.
             </p>
             <div className="space-y-3">
               <input
@@ -2389,11 +2389,11 @@ export default function DashboardPage() {
                 onChange={(e) => setNewKidSecurityQuestion(e.target.value)}
                 className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
               >
-                <option value="What's your favorite pet?">What's your favorite pet?</option>
-                <option value="What's your favorite color?">What's your favorite color?</option>
-                <option value="What's your favorite food?">What's your favorite food?</option>
+                <option value="What is your favorite pet?">What is your favorite pet?</option>
+                <option value="What is your favorite color?">What is your favorite color?</option>
+                <option value="What is your favorite food?">What is your favorite food?</option>
                 <option value="What city were you born in?">What city were you born in?</option>
-                <option value="What's the name of your best friend?">What's the name of your best friend?</option>
+                <option value="What is the name of your best friend?">What is the name of your best friend?</option>
                 <option value="Custom question">Custom question</option>
               </select>
               {newKidSecurityQuestion === 'Custom question' && (

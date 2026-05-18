@@ -114,7 +114,7 @@ export default function CreateAccountPage() {
 
         {/* Title */}
         <div className="text-center mb-8">
-          <h1 className="text-6xl md:text-7xl font-sora font-black mb-2 tracking-tight text-white drop-shadow-lg">
+          <h1 className="text-5xl sm:text-6xl font-sora font-black text-white drop-shadow-lg tracking-wide">
             C.A.S.H.
           </h1>
           <div className="h-1 w-24 mx-auto bg-gradient-to-r from-blue-300 via-teal-300 to-cyan-200 rounded-full"></div>
@@ -285,7 +285,7 @@ export default function CreateAccountPage() {
                 placeholder="Your answer (case-insensitive)"
                 required
               />
-              <p className="text-xs text-gray-500 font-inter mt-1">💡 You'll need to remember this if you forget your password</p>
+              <p className="text-xs text-gray-500 font-inter mt-1">Tip: You will need to remember this if you forget your password.</p>
             </div>
 
             {/* Create Account Button */}

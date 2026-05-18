@@ -263,7 +263,7 @@ export default function FAQPage() {
           <div className="mt-12 glass-card bg-gradient-to-r from-yellow-100/50 to-orange-100/50 border-2 border-yellow-300/50 text-center">
             <h3 className="text-2xl font-sora font-bold text-gray-800 mb-3">Still need help?</h3>
             <p className="text-gray-700 font-inter mb-4">
-              If you can't find the answer you're looking for, try refreshing the page or logging out and back in to reset the app.
+              If you cannot find the answer you are looking for, try refreshing the page or logging out and back in to reset the app.
             </p>
             <div className="flex gap-3 justify-center flex-wrap">
               <Link 

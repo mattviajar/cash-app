@@ -54,7 +54,7 @@ export default function WelcomePage() {
             className="btn-primary w-full text-base sm:text-2xl py-3 sm:py-6 group relative overflow-hidden"
           >
             <span className="relative z-10 flex items-center justify-center gap-3 font-sora font-semibold">
-              Let's Go! 
+              Let us Go! 
               <span className="text-xl sm:text-3xl group-hover:translate-x-2 transition-transform duration-300">🚀</span>
             </span>
             <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-teal-500 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
