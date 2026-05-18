@@ -1,29 +1,49 @@
-#include <ESP32Servo.h>
+#include <Arduino.h>
 
 namespace {
 
 constexpr long SERIAL_BAUD = 115200;
-constexpr uint8_t MOTOR_COUNT = 4;
+constexpr uint8_t MOTOR_COUNT = 5;
 constexpr uint8_t INVALID_PIN = 255;
+constexpr uint8_t HALFSTEP_COUNT = 8;
+
+const uint8_t HALFSTEP_SEQ[HALFSTEP_COUNT][4] = {
+  {1, 0, 0, 0},
+  {1, 1, 0, 0},
+  {0, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 0},
+  {0, 0, 1, 1},
+  {0, 0, 0, 1},
+  {1, 0, 0, 1},
+};
 
 struct MotorConfig {
-  uint8_t servoPin;
+  uint8_t in1;
+  uint8_t in2;
+  uint8_t in3;
+  uint8_t in4;
   uint8_t irPin;
   bool irActiveLow;
-  int forwardUs;
-  int reverseUs;
-  int stopUs;
+  bool forward;
+  unsigned long stepIntervalUs;
   unsigned long startupSettleMs;
   unsigned long timeoutMs;
   uint8_t denomination;
 };
 
-// TODO: Fill these with your real pin map for ESP32 #2.
+// Default pin map for ESP32-WROOM-32 + 5x ULN2003 channels.
+// Motor index meaning:
+// 1 = 1 peso, 2 = 5 peso, 3 = 10 peso, 4 = 20 peso, 5 = extra channel.
+// Note: On classic ESP32, only four input-only GPIOs are normally available
+// for dedicated IR lines (34, 35, 36, 39) while keeping USB Serial on 1/3.
+// Channel 5 is wired for stepper control, but IR5 is left INVALID by default.
 MotorConfig MOTOR_CFG[MOTOR_COUNT] = {
-  {INVALID_PIN, INVALID_PIN, true, 1700, 1300, 1500, 300, 12000, 1},
-  {INVALID_PIN, INVALID_PIN, true, 1700, 1300, 1500, 300, 12000, 5},
-  {INVALID_PIN, INVALID_PIN, true, 1700, 1300, 1500, 300, 12000, 10},
-  {INVALID_PIN, INVALID_PIN, true, 1700, 1300, 1500, 300, 12000, 20},
+  {13, 14, 16, 17, 34, true, true, 1400, 200, 18000, 1},
+  {18, 19, 21, 22, 35, true, true, 1400, 200, 18000, 5},
+  {23, 25, 26, 27, 36, true, true, 1400, 200, 18000, 10},
+  {32, 33, 4, 5, 39, true, true, 1400, 200, 18000, 20},
+  {12, 15, 2, 0, INVALID_PIN, true, true, 1400, 200, 18000, 0},
 };
 
 struct DispenseJob {
@@ -34,34 +54,56 @@ struct DispenseJob {
   bool sensorArmed;
   unsigned long startedMs;
   unsigned long settleUntilMs;
+  unsigned long lastStepUs;
 };
 
-Servo motorServos[MOTOR_COUNT];
-bool servoAttached[MOTOR_COUNT] = {false, false, false, false};
+uint8_t stepIndex[MOTOR_COUNT] = {0, 0, 0, 0, 0};
 DispenseJob currentJob = {};
 String commandBuffer;
 
 bool isMotorConfigured(uint8_t motorIndex) {
   if (motorIndex >= MOTOR_COUNT) return false;
-  return MOTOR_CFG[motorIndex].servoPin != INVALID_PIN && MOTOR_CFG[motorIndex].irPin != INVALID_PIN;
+  const MotorConfig& cfg = MOTOR_CFG[motorIndex];
+  return cfg.in1 != INVALID_PIN && cfg.in2 != INVALID_PIN && cfg.in3 != INVALID_PIN &&
+         cfg.in4 != INVALID_PIN;
 }
 
-void attachMotorServo(uint8_t motorIndex) {
+void writeCoils(uint8_t motorIndex, uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   if (motorIndex >= MOTOR_COUNT) return;
-  if (servoAttached[motorIndex]) return;
-  motorServos[motorIndex].setPeriodHertz(50);
-  motorServos[motorIndex].attach(MOTOR_CFG[motorIndex].servoPin, 500, 2500);
-  servoAttached[motorIndex] = true;
+  const MotorConfig& cfg = MOTOR_CFG[motorIndex];
+  digitalWrite(cfg.in1, a);
+  digitalWrite(cfg.in2, b);
+  digitalWrite(cfg.in3, c);
+  digitalWrite(cfg.in4, d);
 }
 
-void stopMotor(uint8_t motorIndex) {
+void releaseCoils(uint8_t motorIndex) {
+  writeCoils(motorIndex, 0, 0, 0, 0);
+}
+
+void stepMotorOnce(uint8_t motorIndex) {
   if (motorIndex >= MOTOR_COUNT) return;
-  if (!servoAttached[motorIndex]) return;
-  motorServos[motorIndex].writeMicroseconds(MOTOR_CFG[motorIndex].stopUs);
+  const MotorConfig& cfg = MOTOR_CFG[motorIndex];
+  const uint8_t sequenceIndex = stepIndex[motorIndex];
+
+  writeCoils(
+    motorIndex,
+    HALFSTEP_SEQ[sequenceIndex][0],
+    HALFSTEP_SEQ[sequenceIndex][1],
+    HALFSTEP_SEQ[sequenceIndex][2],
+    HALFSTEP_SEQ[sequenceIndex][3]
+  );
+
+  if (cfg.forward) {
+    stepIndex[motorIndex] = (sequenceIndex + 1) & 0x07;
+  } else {
+    stepIndex[motorIndex] = (sequenceIndex + 7) & 0x07;
+  }
 }
 
 bool isIrDetected(uint8_t motorIndex) {
   if (motorIndex >= MOTOR_COUNT || !isMotorConfigured(motorIndex)) return false;
+  if (MOTOR_CFG[motorIndex].irPin == INVALID_PIN) return false;
   const int raw = digitalRead(MOTOR_CFG[motorIndex].irPin);
   return MOTOR_CFG[motorIndex].irActiveLow ? (raw == LOW) : (raw == HIGH);
 }
@@ -70,9 +112,19 @@ void printHelp() {
   Serial.println(F("Commands:"));
   Serial.println(F("  PING"));
   Serial.println(F("  STATUS"));
-  Serial.println(F("  DISPENSE <motor 1..4> <count>"));
+  Serial.println(F("  DISPENSE <motor 1..5> <count>"));
+  Serial.println(F("  DISPENSE_DENOM <1|5|10|20> <count>"));
   Serial.println(F("  STOP"));
   Serial.println(F("  HELP"));
+}
+
+int8_t motorIndexByDenomination(uint8_t denomination) {
+  for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
+    if (MOTOR_CFG[i].denomination == denomination) {
+      return static_cast<int8_t>(i);
+    }
+  }
+  return -1;
 }
 
 void printStatus() {
@@ -90,7 +142,7 @@ void printStatus() {
     Serial.print(F(" ir"));
     Serial.print(i + 1);
     Serial.print('=');
-    if (isMotorConfigured(i)) {
+    if (isMotorConfigured(i) && MOTOR_CFG[i].irPin != INVALID_PIN) {
       Serial.print(digitalRead(MOTOR_CFG[i].irPin));
     } else {
       Serial.print(F("NA"));
@@ -102,7 +154,7 @@ void printStatus() {
 void finishJob() {
   const uint8_t motorIndex = currentJob.motor - 1;
   const uint8_t dispensed = currentJob.dispensedCount;
-  stopMotor(motorIndex);
+  releaseCoils(motorIndex);
   currentJob = {};
   Serial.print(F("DONE motor="));
   Serial.print(motorIndex + 1);
@@ -115,7 +167,7 @@ void finishJob() {
 void failJob(const __FlashStringHelper* reason) {
   const uint8_t motor = currentJob.motor;
   if (motor >= 1 && motor <= MOTOR_COUNT) {
-    stopMotor(motor - 1);
+    releaseCoils(motor - 1);
   }
   currentJob = {};
   Serial.print(F("ERR motor="));
@@ -142,21 +194,34 @@ void startDispense(uint8_t motorNumber, uint8_t count) {
     return;
   }
 
-  attachMotorServo(motorIndex);
-  motorServos[motorIndex].writeMicroseconds(MOTOR_CFG[motorIndex].forwardUs);
-
   currentJob.active = true;
   currentJob.motor = motorNumber;
   currentJob.requestedCount = count;
   currentJob.dispensedCount = 0;
+  if (MOTOR_CFG[motorIndex].irPin == INVALID_PIN) {
+    Serial.print(F("ERR motor="));
+    Serial.print(motorNumber);
+    Serial.println(F(" reason=ir-not-configured"));
+    currentJob = {};
+    return;
+  }
   currentJob.sensorArmed = !isIrDetected(motorIndex);
   currentJob.startedMs = millis();
   currentJob.settleUntilMs = currentJob.startedMs + MOTOR_CFG[motorIndex].startupSettleMs;
+  currentJob.lastStepUs = micros();
 
   Serial.print(F("OK DISPENSE motor="));
   Serial.print(motorNumber);
   Serial.print(F(" count="));
   Serial.println(count);
+}
+
+void serviceStepper(uint8_t motorIndex) {
+  if (motorIndex >= MOTOR_COUNT) return;
+  const unsigned long nowUs = micros();
+  if (nowUs - currentJob.lastStepUs < MOTOR_CFG[motorIndex].stepIntervalUs) return;
+  currentJob.lastStepUs = nowUs;
+  stepMotorOnce(motorIndex);
 }
 
 void serviceDispense() {
@@ -169,6 +234,8 @@ void serviceDispense() {
     failJob(F("timeout"));
     return;
   }
+
+  serviceStepper(motorIndex);
 
   if (nowMs < currentJob.settleUntilMs) return;
 
@@ -196,7 +263,7 @@ void serviceDispense() {
 
 void stopAll() {
   for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
-    stopMotor(i);
+    releaseCoils(i);
   }
   currentJob = {};
   Serial.println(F("OK STOP"));
@@ -237,6 +304,27 @@ void handleCommand(String command) {
     return;
   }
 
+  if (command.startsWith(F("DISPENSE_DENOM "))) {
+    int firstSpace = command.indexOf(' ');
+    int secondSpace = command.indexOf(' ', firstSpace + 1);
+    if (secondSpace < 0) {
+      Serial.println(F("ERR format"));
+      return;
+    }
+
+    const uint8_t denomination = static_cast<uint8_t>(command.substring(firstSpace + 1, secondSpace).toInt());
+    const uint8_t count = static_cast<uint8_t>(command.substring(secondSpace + 1).toInt());
+    const int8_t motorIndex = motorIndexByDenomination(denomination);
+    if (motorIndex < 0) {
+      Serial.print(F("ERR denom="));
+      Serial.print(denomination);
+      Serial.println(F(" reason=not-mapped"));
+      return;
+    }
+    startDispense(static_cast<uint8_t>(motorIndex + 1), count);
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
@@ -261,12 +349,21 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
 
   for (uint8_t i = 0; i < MOTOR_COUNT; ++i) {
+    if (MOTOR_CFG[i].in1 != INVALID_PIN) pinMode(MOTOR_CFG[i].in1, OUTPUT);
+    if (MOTOR_CFG[i].in2 != INVALID_PIN) pinMode(MOTOR_CFG[i].in2, OUTPUT);
+    if (MOTOR_CFG[i].in3 != INVALID_PIN) pinMode(MOTOR_CFG[i].in3, OUTPUT);
+    if (MOTOR_CFG[i].in4 != INVALID_PIN) pinMode(MOTOR_CFG[i].in4, OUTPUT);
     if (MOTOR_CFG[i].irPin != INVALID_PIN) {
-      pinMode(MOTOR_CFG[i].irPin, INPUT_PULLUP);
+      if (MOTOR_CFG[i].irPin >= 34) {
+        pinMode(MOTOR_CFG[i].irPin, INPUT);
+      } else {
+        pinMode(MOTOR_CFG[i].irPin, INPUT_PULLUP);
+      }
     }
+    releaseCoils(i);
   }
 
-  Serial.println(F("ESP32 COIN SERVO CONTROLLER READY"));
+  Serial.println(F("ESP32 COIN STEPPER CONTROLLER READY"));
   printHelp();
 }
 
