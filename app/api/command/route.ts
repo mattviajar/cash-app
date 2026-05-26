@@ -3,10 +3,15 @@ import { NextResponse } from 'next/server'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
 import {
+  buildExactBreakdown,
   buildInventoryDecrementData,
+  inventoryFieldLabel,
+  inventoryFieldValue,
+  parseInventoryField,
   normalizeCashAmount,
   planWithdrawalBreakdown,
 } from '@/lib/machine-cash'
+import { isKidOwnedByParent } from '@/lib/parent-ownership'
 
 async function findOrCreateAccountByUsername(
   tx: Prisma.TransactionClient,
@@ -52,6 +57,15 @@ function parseWithdrawAmount(command: string): number | null {
   return normalizeCashAmount(value)
 }
 
+function parsePositiveCount(value: unknown): number | null {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+  const count = Math.round(parsed)
+  return count > 0 ? count : null
+}
+
 // Producer: dashboard posts commands here when a withdrawal is approved.
 export async function POST(request: Request) {
   let body: unknown
@@ -70,8 +84,15 @@ export async function POST(request: Request) {
   const username = typeof payload.account === 'string' ? payload.account.trim().toLowerCase() : ''
   const lockOwner = typeof payload.lockOwner === 'string' ? payload.lockOwner.trim().toLowerCase() : username
   const role = typeof payload.role === 'string' ? payload.role.trim().toLowerCase() : 'kid'
+  const parentUsername =
+    typeof payload.parentUsername === 'string'
+      ? payload.parentUsername.trim().toLowerCase()
+      : ''
   const autoCreate = payload.autoCreate !== false
   const note = typeof payload.note === 'string' ? payload.note.trim() : 'Machine withdrawal'
+  const requestedDenomination = typeof payload.denomination === 'string' ? payload.denomination.trim() : ''
+  const requestedCount = parsePositiveCount(payload.quantity ?? payload.count) ?? 1
+  const requestedField = requestedDenomination ? parseInventoryField(requestedDenomination) : null
 
   const withdrawAmount = parseWithdrawAmount(cmd)
 
@@ -99,12 +120,26 @@ export async function POST(request: Request) {
         })
 
         console.log(`[WITHDRAW] amount=${withdrawAmount} inventory=`, inventory)
-        
-        const plan = planWithdrawalBreakdown(inventory, withdrawAmount)
+
+        let plan = null as Awaited<ReturnType<typeof planWithdrawalBreakdown>>
+        let effectiveAmount = withdrawAmount
+
+        if (requestedField) {
+          const available = inventory[requestedField]
+          if (available < requestedCount) {
+            throw new Error('INSUFFICIENT_INVENTORY')
+          }
+          plan = buildExactBreakdown(requestedField, requestedCount)
+          effectiveAmount = inventoryFieldValue(requestedField) * requestedCount
+          console.log(`[WITHDRAW] exact denomination ${inventoryFieldLabel(requestedField)} x${requestedCount}`)
+        } else {
+          plan = planWithdrawalBreakdown(inventory, withdrawAmount)
+        }
+
         if (!plan) {
           throw new Error('INSUFFICIENT_INVENTORY')
         }
-        
+
         console.log(`[WITHDRAW] plan generated=`, plan)
 
         const decrementData = buildInventoryDecrementData(plan)
@@ -119,20 +154,31 @@ export async function POST(request: Request) {
           if (!account) {
             throw new Error('ACCOUNT_NOT_FOUND')
           }
-          if (account.balance < withdrawAmount) {
+
+          if (account.role === 'kid') {
+            const ownerCandidate = parentUsername || (lockOwner !== account.username ? lockOwner : '')
+            if (ownerCandidate) {
+              const allowed = await isKidOwnedByParent(tx, ownerCandidate, account.username)
+              if (!allowed) {
+                throw new Error('UNAUTHORIZED_CHILD_ACCESS')
+              }
+            }
+          }
+
+          if (account.balance < effectiveAmount) {
             throw new Error('INSUFFICIENT_ACCOUNT_BALANCE')
           }
 
           const updated = await tx.account.update({
             where: { id: account.id },
-            data: { balance: { decrement: withdrawAmount } },
+            data: { balance: { decrement: effectiveAmount } },
           })
           accountBalance = updated.balance
 
           await tx.transaction.create({
             data: {
               accountId: account.id,
-              amount: -Math.abs(withdrawAmount),
+              amount: -Math.abs(effectiveAmount),
               note,
               kind: 'machine-withdrawal',
               when: 'Just now',
@@ -143,7 +189,7 @@ export async function POST(request: Request) {
         await tx.machineCashEvent.create({
           data: {
             direction: 'OUT',
-            amount: withdrawAmount,
+            amount: effectiveAmount,
             accountUsername: username || null,
             note,
             source: 'dashboard',
@@ -153,7 +199,7 @@ export async function POST(request: Request) {
 
         // Send breakdown to firmware so it knows which motors to use
         // Format: WITHDRAW <amount> [coin20=N coin10=N ...]
-        let cmdStr = `WITHDRAW ${withdrawAmount}`
+        let cmdStr = `WITHDRAW ${effectiveAmount}`
         if (plan.coin20 > 0) cmdStr += ` coin20=${plan.coin20}`
         if (plan.coin10 > 0) cmdStr += ` coin10=${plan.coin10}`
         if (plan.coin5 > 0) cmdStr += ` coin5=${plan.coin5}`
@@ -184,6 +230,9 @@ export async function POST(request: Request) {
       }
       if (e instanceof Error && e.message === 'DEVICE_LOCK_MISMATCH') {
         return NextResponse.json({ error: 'Device is currently locked by another user' }, { status: 409 })
+      }
+      if (e instanceof Error && e.message === 'UNAUTHORIZED_CHILD_ACCESS') {
+        return NextResponse.json({ error: 'You can only access your own kid accounts' }, { status: 403 })
       }
       const detail = JSON.stringify(e, Object.getOwnPropertyNames(e as object))
       return NextResponse.json({ error: 'DB error', detail }, { status: 500 })

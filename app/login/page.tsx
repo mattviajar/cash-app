@@ -12,6 +12,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [rememberMe, setRememberMe] = useState(false)
 
+  type LoginErrorResponse = {
+    error?: string
+    code?: string
+  }
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     const normalizedUsername = username.trim().toLowerCase()
@@ -23,12 +28,17 @@ export default function LoginPage() {
         username: normalizedUsername,
         password,
         role: userType,
+        rememberMe,
       }),
     })
 
     if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: 'Login failed' }))
-      alert(`❌ ${data.error ?? 'Login failed'}`)
+      const data = await res.json().catch(() => ({ error: 'Login failed' })) as LoginErrorResponse
+      const errorMessage =
+        data.code === 'ACCOUNT_ROLE_MISMATCH'
+          ? `❌ ${data.error ?? 'Wrong account type selected.'}`
+          : `❌ ${data.error ?? 'Login failed'}`
+      alert(errorMessage)
       return
     }
 

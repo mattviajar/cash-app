@@ -8,7 +8,7 @@ const COIN_VALUES = [20, 10, 5, 1] as const
 type BillValue = (typeof BILL_VALUES)[number]
 type CoinValue = (typeof COIN_VALUES)[number]
 
-type InventoryField =
+export type InventoryField =
   | 'bill20'
   | 'bill50'
   | 'bill100'
@@ -70,6 +70,50 @@ function coinField(value: CoinValue): InventoryField {
       return 'coin10'
     case 20:
       return 'coin20'
+  }
+}
+
+export function parseInventoryField(value: string): InventoryField | null {
+  switch (value.trim().toLowerCase()) {
+    case 'bill20': return 'bill20'
+    case 'bill50': return 'bill50'
+    case 'bill100': return 'bill100'
+    case 'bill500': return 'bill500'
+    case 'bill1000': return 'bill1000'
+    case 'coin1': return 'coin1'
+    case 'coin5': return 'coin5'
+    case 'coin10': return 'coin10'
+    case 'coin20': return 'coin20'
+    default:
+      return null
+  }
+}
+
+export function inventoryFieldValue(field: InventoryField): number {
+  switch (field) {
+    case 'bill20': return 20
+    case 'bill50': return 50
+    case 'bill100': return 100
+    case 'bill500': return 500
+    case 'bill1000': return 1000
+    case 'coin1': return 1
+    case 'coin5': return 5
+    case 'coin10': return 10
+    case 'coin20': return 20
+  }
+}
+
+export function inventoryFieldLabel(field: InventoryField): string {
+  switch (field) {
+    case 'bill20': return '20 bill'
+    case 'bill50': return '50 bill'
+    case 'bill100': return '100 bill'
+    case 'bill500': return '500 bill'
+    case 'bill1000': return '1000 bill'
+    case 'coin1': return '1 coin'
+    case 'coin5': return '5 coin'
+    case 'coin10': return '10 coin'
+    case 'coin20': return '20 coin'
   }
 }
 
@@ -218,5 +262,15 @@ export function buildBreakdownFromField(field: InventoryField | null): Inventory
   }
   const breakdown = { ...ZERO_BREAKDOWN }
   breakdown[field] = 1
+  return breakdown
+}
+
+export function buildExactBreakdown(field: InventoryField, count: number): InventoryBreakdown | null {
+  const normalizedCount = Math.max(1, Math.round(count))
+  if (!Number.isFinite(normalizedCount) || normalizedCount <= 0) {
+    return null
+  }
+  const breakdown = { ...ZERO_BREAKDOWN }
+  breakdown[field] = normalizedCount
   return breakdown
 }

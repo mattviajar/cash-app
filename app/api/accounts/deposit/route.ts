@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import type { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { getParentUsernameFromRequest, isKidOwnedByParent } from '@/lib/parent-ownership'
 
 async function findOrCreateAccountByUsername(
   tx: Prisma.TransactionClient,
@@ -44,6 +45,10 @@ export async function POST(request: Request) {
   const payload = body as Record<string, unknown>
   const username = typeof payload.username === 'string' ? payload.username.trim().toLowerCase() : ''
   const role = typeof payload.role === 'string' ? payload.role.trim().toLowerCase() : 'kid'
+  const parentUsername =
+    typeof payload.parentUsername === 'string'
+      ? payload.parentUsername.trim().toLowerCase()
+      : getParentUsernameFromRequest(request)
   const note = typeof payload.note === 'string' ? payload.note.trim() : 'Manual deposit'
   const source = typeof payload.source === 'string' ? payload.source.trim() : 'dashboard'
   const autoCreate = payload.autoCreate !== false
@@ -54,6 +59,13 @@ export async function POST(request: Request) {
   }
   if (!Number.isFinite(amount) || amount <= 0 || amount > 10000) {
     return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
+  }
+
+  if (role === 'kid' && parentUsername) {
+    const allowed = await isKidOwnedByParent(prisma, parentUsername, username)
+    if (!allowed) {
+      return NextResponse.json({ error: 'You can only deposit to your own kid accounts' }, { status: 403 })
+    }
   }
 
   try {

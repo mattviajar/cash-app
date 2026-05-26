@@ -1,25 +1,32 @@
+#include <Wire.h>
+#include <ESP32Servo.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <Preferences.h>
-#include <Wire.h>
-#include <ESP32Servo.h>
 
 namespace {
 
 constexpr long USB_SERIAL_BAUD = 115200;
-constexpr long UNO_SERIAL_BAUD = 9600;
-constexpr uint8_t UNO_RX_PIN = 16;
-constexpr uint8_t UNO_TX_PIN = 5;  // moved off GPIO17 (suspect dead) to GPIO5
+constexpr long RASPI_UART_BAUD = 115200;
+constexpr uint8_t RASPI_UART_RX_PIN = 16;
+constexpr uint8_t RASPI_UART_TX_PIN = 17;
+constexpr const char* WIFI_SSID = "CASHWIFI";
+constexpr const char* WIFI_PASSWORD = "CASH12345!";
+constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000;
+constexpr bool CLOUD_API_ENABLED = true;
+constexpr bool LEGACY_USB_BRIDGE_COMPAT = false;
+constexpr unsigned long CLOUD_COMMAND_POLL_INTERVAL_MS = 500;
+constexpr const char* CLOUD_DEPOSIT_API = "https://cashmv.up.railway.app/api/deposit";
+constexpr const char* CLOUD_COMMAND_API = "https://cashmv.up.railway.app/api/command?consume=true";
+constexpr const char* CLOUD_DEVICE_STATUS_API = "https://cashmv.up.railway.app/api/device/status";
 constexpr bool STEPPERS_ENABLED = true;
 constexpr bool SERVOS_ENABLED = true;
 constexpr bool MOTION_ARMED_DEFAULT = true;
-// IR5 sensors removed; their GPIOs (13/25/26/33/34) are now used for direct servo PWM.
-// Lift-to-IR5 sequences depend on those sensors, so disable the auto sequence at boot.
-constexpr bool AUTO_LIFT_TO_IR5_1_ON_BOOT = false;
-// Master switch: when false, all IR5 sensor pin reads are skipped and pinMode
-// for IR5_PINS is NOT called (those GPIOs are now servo outputs).
-constexpr bool IR5_SENSORS_ENABLED = false;
+// IR5 sensors are wired directly to ESP32 GPIOs and used by the lift routing logic.
+// Keep auto-run disabled on boot so startup is deterministic.
+constexpr bool AUTO_LIFT_TO_IR5_1_ON_BOOT = true;
+// Master switch for IR5 level sensors (slots 1..5).
+constexpr bool IR5_SENSORS_ENABLED = true;
 constexpr bool AUTO_LIFT_TO_BOTTOM_ON_BOOT = false;
 constexpr bool AUTO_BILL_ROUTE_ENABLED = true;
 constexpr bool ACCEPTORS_CONNECTED = true;
@@ -42,7 +49,9 @@ constexpr unsigned long IR5_SLOT4_EXTRA_HOLD_MS = 120;
 constexpr bool IR5_RAW_EVENT_LOG = false;
 constexpr unsigned long STARTUP_GRACE_MS = 1500;
 constexpr unsigned long POST_DETECT_SETTLE_MS = 180;
-constexpr unsigned long DISPENSE_TIMEOUT_MS = 12000;
+// Host-side remote-task watchdog. Set 0 to disable timeout and wait for
+// explicit DONE/ERR from ESP2.
+constexpr unsigned long DISPENSE_TIMEOUT_MS = 0;
 constexpr unsigned long STATUS_PRINT_MS = 1000;
 constexpr bool STATUS_VERBOSE_LOG = false;
 constexpr unsigned long PULSE_MIN_EDGE_GAP_MS = 20;  // Polled-loop default; bill ISR uses its own value below.
@@ -55,34 +64,35 @@ constexpr uint8_t M4_IN1_PIN = 18;
 constexpr uint8_t M4_IN2_PIN = 19;
 constexpr uint8_t M4_IN3_PIN = 23;
 constexpr uint8_t M4_IN4_PIN = 27;  // moved from GPIO13 (unreliable); GPIO27 freed from IR4 (now on Uno A3)
-constexpr uint8_t M4_IR_PIN = 35;   // local IR for motor 4 (input-only, free GPIO)
+constexpr uint8_t M4_IR_PIN = 36;   // local IR for motor 4 (input-only)
 
 constexpr uint8_t BILL_PIN = 32;
 constexpr uint8_t COIN_PIN = 14;
-// IR5_1 moved to GPIO34 to avoid conflict with BILL_PIN on GPIO32.
-constexpr uint8_t IR5_PINS[] = {34, 33, 25, 13, 26}; // IR5-4=GPIO13, IR5-5=GPIO26
+// IR5 slots 1..5. Chosen to avoid overlap with the PCA9685 I2C pins.
+constexpr uint8_t IR5_PINS[] = {34, 35, 33, 25, 26};
 
 constexpr uint8_t SERVO_CHANNEL_COUNT = 7;
 constexpr uint16_t SERVO_PWM_MIN = 110;
 constexpr uint16_t SERVO_PWM_MAX = 510;
-// Legacy PCA9685 constants kept so old code paths still compile, but the chip
-// is no longer used. All 7 channels are now driven directly from ESP32 GPIOs
-// via the ESP32Servo library.
+// PCA9685 register map/constants for the 7 servo channels on I2C address 0x40.
 constexpr uint8_t PCA9685_ADDRESS = 0x40;
 constexpr uint8_t PCA9685_MODE1 = 0x00;
+constexpr uint8_t PCA9685_MODE2 = 0x01;
 constexpr uint8_t PCA9685_PRESCALE = 0xFE;
 constexpr uint8_t PCA9685_LED0_ON_L = 0x06;
+constexpr bool USE_PCA9685 = false;
 
-// Direct-GPIO pin map for the 7 servo channels (replaces PCA9685 channel 0..6).
-// CH0..CH4 = storage spinners 1..5, CH5 = elevator lift, CH6 = output spinner.
+// Direct ESP32 GPIO map for channels 0..6.
+// CH0..CH4 are the 5 storage motors (no PCA required).
+// CH5/CH6 are optional extra channels for lift/out paths.
 constexpr uint8_t SERVO_GPIO_PINS[SERVO_CHANNEL_COUNT] = {
-  13,  // CH0 storage spinner 1
-  25,  // CH1 storage spinner 2
-  26,  // CH2 storage spinner 3
-  33,  // CH3 storage spinner 4
-  21,  // CH4 storage spinner 5 (was I2C SDA)
-  22,  // CH5 elevator lift     (was I2C SCL)
-  4    // CH6 output spinner
+  4,   // CH0 storage spinner 1
+  5,   // CH1 storage spinner 2
+  13,  // CH2 storage spinner 3
+  21,  // CH3 storage spinner 4
+  22,  // CH4 storage spinner 5
+  12,  // CH5 optional channel
+  15   // CH6 optional channel
 };
 constexpr int SERVO_PULSE_MIN_US = 500;   // matches angle 0
 constexpr int SERVO_PULSE_MAX_US = 2500;  // matches angle 180
@@ -93,8 +103,8 @@ bool channelServoAttached[SERVO_CHANNEL_COUNT] = {false, false, false, false, fa
 constexpr uint8_t SPINNER_CHANNEL_MIN = 0;   // CH0..CH4 storage spinner servos
 constexpr uint8_t SPINNER_CHANNEL_MAX = 4;
 constexpr uint8_t STORAGE_SLOT_COUNT = 5;
-constexpr uint8_t ELEVATOR_LIFT_CHANNEL = 5; // CH5 elevator lift servo
-constexpr uint8_t ELEVATOR_OUT_CHANNEL = 6;  // CH6 elevator output spinner
+constexpr uint8_t ELEVATOR_LIFT_CHANNEL = 6; // CH6 elevator lift servo
+constexpr uint8_t ELEVATOR_OUT_CHANNEL = 5;  // CH5 elevator output spinner
 constexpr bool LIFT_DIRECTION_INVERTED = true;
 
 // 360 servo commands: 90=stop, >90 rotate one direction, <90 rotate opposite direction.
@@ -172,22 +182,30 @@ constexpr unsigned long ELEVATOR_CATCH_SLOW_UP_MS = 1300;
 constexpr unsigned long ELEVATOR_PARK_RECOVER_BURST_MS = 180;
 constexpr unsigned long ELEVATOR_PARK_RETRY_HOLD_MS = 150;
 constexpr unsigned long ELEVATOR_LIFT_DIRECTION_TEST_MS = 2000;
-// Withdrawal timing -- per-bill cycle: forward 2s -> backward 1s (matches
-// the standalone spinner1_gpio13_test profile validated on hardware).
-constexpr unsigned long WITHDRAW_SPIN_MS = 2500;           // time to eject one bill (forward)
-constexpr unsigned long WITHDRAW_REVERSE_MS = 1000;        // reverse pulse to settle next bill back into position
+constexpr unsigned long SERVO_TEST_DEFAULT_MS = 3000;
+constexpr unsigned long SERVO_TEST_MIN_MS = 200;
+constexpr unsigned long SERVO_TEST_MAX_MS = 120000;
+// Withdrawal timing per storage spinner slot index (0..4 => slot 1..5).
+// Per user calibration:
+// M1: F1500 B300, M2: F1500 B300, M3: F1500 B300, M4: F1000 B300, M5: F1500 B300.
+constexpr unsigned long WITHDRAW_FORWARD_MS_BY_SLOT[STORAGE_SLOT_COUNT] = {1500, 1500, 900, 1000, 1500};
+constexpr unsigned long WITHDRAW_REVERSE_MS_BY_SLOT[STORAGE_SLOT_COUNT] = {300, 300, 300, 300, 300};
 constexpr unsigned long WITHDRAW_INTER_BILL_GAP_MS = 600;  // pause between bills
 constexpr unsigned long WITHDRAW_TOTAL_TIMEOUT_MS = 120000; // 2-min safety timeout
 constexpr unsigned long JOB_MAX_RUNTIME_MS = 900000;        // 15-min motor safety cap
 
-// Per-slot extra forward time (slot index 0..4 == storage slot 1..5).
-// Slot 5 needs +1s of forward push compared to the others.
-constexpr unsigned long WITHDRAW_SPIN_EXTRA_MS[STORAGE_SLOT_COUNT] = {0, 0, 0, 0, 1000};
-inline unsigned long withdrawSpinMsForSlot(uint8_t slot) {
-  if (slot >= 1 && slot <= STORAGE_SLOT_COUNT) {
-    return WITHDRAW_SPIN_MS + WITHDRAW_SPIN_EXTRA_MS[slot - 1];
+inline unsigned long withdrawForwardMsForSlot(uint8_t slotIndex) {
+  if (slotIndex < STORAGE_SLOT_COUNT) {
+    return WITHDRAW_FORWARD_MS_BY_SLOT[slotIndex];
   }
-  return WITHDRAW_SPIN_MS;
+  return WITHDRAW_FORWARD_MS_BY_SLOT[0];
+}
+
+inline unsigned long withdrawReverseMsForSlot(uint8_t slotIndex) {
+  if (slotIndex < STORAGE_SLOT_COUNT) {
+    return WITHDRAW_REVERSE_MS_BY_SLOT[slotIndex];
+  }
+  return WITHDRAW_REVERSE_MS_BY_SLOT[0];
 }
 
 constexpr uint8_t HALF_STEP[8][4] = {
@@ -198,6 +216,14 @@ constexpr uint8_t HALF_STEP[8][4] = {
   {0, 0, 1, 0},
   {0, 0, 1, 1},
   {0, 0, 0, 1},
+  {1, 0, 0, 1},
+};
+
+// Full-step sequence keeps two coils energized each step for higher torque.
+constexpr uint8_t FULL_STEP_DUAL[4][4] = {
+  {1, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 1},
   {1, 0, 0, 1},
 };
 
@@ -239,27 +265,11 @@ constexpr PulseMap BILL_MAP[] = {
   {100, 1000.0f},
 };
 
-// Hardcoded fallback network. The customer can broadcast a phone hotspot
-// with this SSID/password and the ATM will auto-connect on first boot.
-// Once online they open the dashboard and use the SETWIFI form to switch
-// the device onto their permanent WiFi (saved to NVS).
-constexpr char WIFI_SSID[] = "CASHWIFI";
-constexpr char WIFI_PASSWORD[] = "CASH12345!";
-// Runtime-mutable copies. Loaded from NVS at boot (namespace "atm-wifi",
-// keys "ssid"/"pass") with the constexpr fallback above as the default.
-// Updated at runtime by the SETWIFI command from the dashboard.
-String runtimeWifiSsid = WIFI_SSID;
-String runtimeWifiPassword = WIFI_PASSWORD;
-constexpr char DEPOSIT_API_URL[] = "https://cashmv.up.railway.app/api/deposit";
-constexpr char COMMAND_API_URL[] = "https://cashmv.up.railway.app/api/command";
-constexpr char DEVICE_STATUS_API_URL[] = "https://cashmv.up.railway.app/api/device/status";
-constexpr unsigned long COMMAND_POLL_MS = 10000;
-constexpr unsigned long COMMAND_POLL_RETRY_MS = 15000;
-constexpr uint16_t COMMAND_HTTP_TIMEOUT_MS = 5000;
-constexpr bool COMMAND_POLL_VERBOSE = false;
+// Set true only for legacy acceptors that report 2x the configured value.
+constexpr bool BILL_AMOUNT_HALVE_AFTER_MAP = false;
+
 constexpr unsigned long LOOP_HEARTBEAT_MS = 3000;
 constexpr bool LOOP_HEARTBEAT_VERBOSE = false;
-constexpr unsigned long COMMAND_SKIP_LOG_MS = 5000;
 
 struct MotorState {
   int sequenceIndex;
@@ -302,9 +312,14 @@ struct LocalCoinServoJob {
   unsigned long settleUntilMs;
 };
 
-constexpr unsigned long M4_FORWARD_RUN_MS  = 14000;
+constexpr unsigned long M4_FORWARD_RUN_MS  = 15000;
 constexpr unsigned long M4_BACKWARD_RUN_MS = 10000;
 constexpr unsigned long M4_STEP_INTERVAL_US = 1500;
+constexpr unsigned long M4_DETECT_HOLD_MS = 30;
+constexpr unsigned long M4_DETECT_PULSE_MIN_MS = 8;
+constexpr uint8_t M4_BASELINE_SAMPLES = 16;
+constexpr bool M4_ENABLE_CYCLE_FALLBACK = false;
+constexpr bool M4_USE_FULLSTEP_HIGH_TORQUE = true;
 
 struct LocalDispenseJob {
   bool active;
@@ -312,6 +327,7 @@ struct LocalDispenseJob {
   uint8_t dispensedCount;
   bool sensorArmed;
   bool goingForward;
+  bool sawDetectThisCycle;
   unsigned long startedMs;
   unsigned long coinDeadlineMs;
   unsigned long phaseStartedMs;
@@ -436,28 +452,26 @@ bool ir5RawLastState[5] = {false, false, false, false, false};
 bool ir5StableState[5] = {false, false, false, false, false};
 unsigned long ir5RawChangedMs[5] = {0, 0, 0, 0, 0};
 unsigned long ir5DetectStartedMs[5] = {0, 0, 0, 0, 0};
-bool unoOnline = false;
+bool esp2Online = false;
 bool remoteTaskActive = false;
 unsigned long remoteTaskSentMs = 0;
 uint8_t remoteTaskMotor = 0;
 uint8_t remoteTaskCount = 0;
 uint8_t m4PinMap[4] = {0, 1, 2, 3}; // maps step columns → IN1/IN2/IN3/IN4 (try different orderings to find working wiring)
 int m4IrBaselineLevel = HIGH;
+volatile bool m4IrLatchedDetect = false;
+volatile bool m4IrMonitorActive = false;
 bool motionArmed = MOTION_ARMED_DEFAULT;
 bool pulseDebugEnabled = false;
 InputDiag inputDiag = {false, 0, nullptr, true, 0, 0, 0, 0};
 uint8_t currentLiftCommand = SERVO_STOP_CMD;
 String usbCommandBuffer;
-String unoLineBuffer;
+String esp2LineBuffer;
 unsigned long lastStatusPrintMs = 0;
-unsigned long lastWifiAttemptMs = 0;
-unsigned long lastCommandPollMs = 0;
-unsigned long lastCommandPollErrorMs = 0;
-uint8_t commandPollFailures = 0;
 unsigned long lastLoopHeartbeatMs = 0;
-unsigned long lastCommandSkipLogMs = 0;
+unsigned long lastCloudCommandPollMs = 0;
 
-HardwareSerial UnoSerial(2);
+HardwareSerial RaspiSerial(2);
 uint8_t servoHomeAngles[SERVO_CHANNEL_COUNT] = {
   SERVO_STOP_CMD,
   SERVO_STOP_CMD,
@@ -475,15 +489,15 @@ constexpr unsigned long IR5_DWELL_MS = 150;
 
 void stopElevatorPark();
 void startElevatorPark(uint8_t slot);
+bool moveLiftDirectToSlotInstantStop(uint8_t slot);
+void startLiftToIr51Sequence(const __FlashStringHelper* reason);
 void handleUsbCommand(String command);
-void handleUnoLine(const String& line);
+void handleEsp2Line(const String& line);
 bool startLocalCoinServoJob(uint8_t motor, uint8_t count);
 void serviceLocalCoinServoJob();
 
-// ===== Direct-GPIO servo backend (replaces PCA9685) =====
-// The PCA chip is no longer required. All 7 channels (0..6) are driven by
-// ESP32 LEDC PWM via the ESP32Servo library on the GPIOs in SERVO_GPIO_PINS.
-// The original pcaSetPwm(channel, 0, 0) idiom is preserved as "detach servo".
+// ===== PCA9685 backend =====
+// Production servo control is driven by PCA9685 channel outputs (0..6) over I2C.
 void attachChannelServo(uint8_t channel) {
   if (channel >= SERVO_CHANNEL_COUNT) return;
   if (channelServoAttached[channel]) return;
@@ -500,37 +514,93 @@ void detachChannelServo(uint8_t channel) {
   channelServoAttached[channel] = false;
 }
 
-// Compatibility shims so existing code that called pcaWriteRegister/pcaReadRegister
-// still compiles. They now do nothing (no PCA chip).
-void pcaWriteRegister(uint8_t /*reg*/, uint8_t /*value*/) {}
-uint8_t pcaReadRegister(uint8_t /*reg*/) { return 0; }
-
-// Compatibility shim: pcaSetPwm(channel, 0, 0) is the existing idiom for
-// "disable PWM on this channel". Map it to detaching the servo. Other counts
-// are handled via setServoAngle() instead.
-void pcaSetPwm(uint8_t channel, uint16_t onCount, uint16_t offCount) {
-  if (channel >= SERVO_CHANNEL_COUNT) return;
-  if (onCount == 0 && offCount == 0) {
-    detachChannelServo(channel);
+void pcaWriteRegister(uint8_t reg, uint8_t value) {
+  if (!USE_PCA9685) {
+    (void)reg;
+    (void)value;
+    return;
   }
+  Wire.beginTransmission(PCA9685_ADDRESS);
+  Wire.write(reg);
+  Wire.write(value);
+  Wire.endTransmission();
 }
 
-// No PCA chip to probe anymore — always report present so existing boot gates pass.
-bool pcaIsPresent() { return true; }
+uint8_t pcaReadRegister(uint8_t reg) {
+  if (!USE_PCA9685) {
+    (void)reg;
+    return 0;
+  }
+  Wire.beginTransmission(PCA9685_ADDRESS);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return 0;
+  }
+  Wire.requestFrom(PCA9685_ADDRESS, static_cast<uint8_t>(1));
+  if (Wire.available()) {
+    return Wire.read();
+  }
+  return 0;
+}
+
+void pcaSetPwm(uint8_t channel, uint16_t onCount, uint16_t offCount) {
+  if (channel >= SERVO_CHANNEL_COUNT) return;
+
+  if (!USE_PCA9685) {
+    if (onCount == 0 && offCount == 0) {
+      detachChannelServo(channel);
+      return;
+    }
+
+    const uint16_t ticks = static_cast<uint16_t>(offCount & 0x0FFF);
+    uint32_t pulseUs = (static_cast<uint32_t>(ticks) * 20000UL) / 4096UL;
+    if (pulseUs < 500UL) pulseUs = 500UL;
+    if (pulseUs > 2500UL) pulseUs = 2500UL;
+
+    attachChannelServo(channel);
+    channelServos[channel].writeMicroseconds(static_cast<int>(pulseUs));
+    return;
+  }
+
+  const uint8_t baseReg = PCA9685_LED0_ON_L + static_cast<uint8_t>(4 * channel);
+  pcaWriteRegister(baseReg + 0, onCount & 0xFF);
+  pcaWriteRegister(baseReg + 1, (onCount >> 8) & 0x0F);
+  pcaWriteRegister(baseReg + 2, offCount & 0xFF);
+  pcaWriteRegister(baseReg + 3, (offCount >> 8) & 0x0F);
+}
+
+bool pcaIsPresent() {
+  if (!USE_PCA9685) {
+    return true;
+  }
+  Wire.beginTransmission(PCA9685_ADDRESS);
+  return Wire.endTransmission() == 0;
+}
 
 void pcaInit50Hz() {
-  // No PCA: pre-attach all channels so initial setServoAngle calls don't have
-  // any first-write latency. Each servo is held at 1500us (stop) until a real
-  // command is issued.
-  for (uint8_t ch = 0; ch < SERVO_CHANNEL_COUNT; ++ch) {
-    attachChannelServo(ch);
-    channelServos[ch].writeMicroseconds(1500);
+  if (!USE_PCA9685) {
+    return;
   }
+  // Force totem-pole outputs (OUTDRV=1) for servo signal compatibility.
+  // Some boards/power-up states can leave outputs in open-drain behavior.
+  pcaWriteRegister(PCA9685_MODE2, 0x04);
+
+  // Enter sleep before prescale write.
+  const uint8_t oldMode = pcaReadRegister(PCA9685_MODE1);
+  const uint8_t sleepMode = static_cast<uint8_t>((oldMode & 0x7F) | 0x10);
+  pcaWriteRegister(PCA9685_MODE1, sleepMode);
+
+  // 25MHz / (4096 * 50Hz) - 1 = 121
+  pcaWriteRegister(PCA9685_PRESCALE, 121);
+  pcaWriteRegister(PCA9685_MODE1, oldMode);
+  delay(5);
+  // Auto-increment enabled.
+  pcaWriteRegister(PCA9685_MODE1, static_cast<uint8_t>(oldMode | 0x20));
 }
 
 void pcaAllChannelsOff() {
   for (uint8_t ch = 0; ch < SERVO_CHANNEL_COUNT; ++ch) {
-    detachChannelServo(ch);
+    pcaSetPwm(ch, 0, 0);
   }
 }
 
@@ -553,11 +623,22 @@ bool isIr5RawDetected(uint8_t slot) {
     }
     return false;
   }
-  // Slots 4 and 5 (IR5-4 / IR5-5) are electrically noisy: take a quick
-  // majority vote across 7 samples spaced 150us apart (~1ms total). Wins
-  // fast detection and rejects sub-millisecond chatter without long
-  // debounce delay.
-  if (slot == 3 || slot == 4) {
+  // IR5-4 is prone to distant/false triggers. Use a stricter confidence gate:
+  // 9 fast samples and require at least 8 hits before reporting detected.
+  // This reduces sensitivity without changing global IR polarity settings.
+  if (slot == 3) {
+    uint8_t hits = 0;
+    for (uint8_t i = 0; i < 9; ++i) {
+      const int s = digitalRead(IR5_PINS[slot]);
+      const bool det = ir5ActiveLow[slot] ? (s == LOW) : (s == HIGH);
+      if (det) ++hits;
+      delayMicroseconds(150);
+    }
+    return hits >= 8;
+  }
+
+  // IR5-5 keeps the previous noise-tolerant majority vote behavior.
+  if (slot == 4) {
     uint8_t hits = 0;
     for (uint8_t i = 0; i < 7; ++i) {
       const int s = digitalRead(IR5_PINS[slot]);
@@ -565,7 +646,7 @@ bool isIr5RawDetected(uint8_t slot) {
       if (det) ++hits;
       delayMicroseconds(150);
     }
-    return hits >= 4; // majority of 7
+    return hits >= 4;
   }
   const int raw = digitalRead(IR5_PINS[slot]);
   return ir5ActiveLow[slot] ? (raw == LOW) : (raw == HIGH);
@@ -605,6 +686,27 @@ int8_t currentIr5FaceSlot() {
 bool isM4IrDetected() {
   const int raw = digitalRead(M4_IR_PIN);
   return raw != m4IrBaselineLevel;
+}
+
+int sampleM4IrBaselineLevel() {
+  uint8_t highCount = 0;
+  for (uint8_t i = 0; i < M4_BASELINE_SAMPLES; ++i) {
+    if (digitalRead(M4_IR_PIN) == HIGH) {
+      ++highCount;
+    }
+    delayMicroseconds(200);
+  }
+  return (highCount >= (M4_BASELINE_SAMPLES / 2)) ? HIGH : LOW;
+}
+
+void IRAM_ATTR onM4IrPinChange() {
+  if (!m4IrMonitorActive) {
+    return;
+  }
+  const int raw = digitalRead(M4_IR_PIN);
+  if (raw != m4IrBaselineLevel) {
+    m4IrLatchedDetect = true;
+  }
 }
 
 bool isCoinServoConfigured(uint8_t motorIndex) {
@@ -658,6 +760,18 @@ void releaseMotor4() {
 }
 
 void stepMotor4Forward() {
+  if (M4_USE_FULLSTEP_HIGH_TORQUE) {
+    const uint8_t index = static_cast<uint8_t>(motor4.sequenceIndex & 0x03);
+    writeMotor4(
+      FULL_STEP_DUAL[index][0],
+      FULL_STEP_DUAL[index][1],
+      FULL_STEP_DUAL[index][2],
+      FULL_STEP_DUAL[index][3]
+    );
+    motor4.sequenceIndex = (index + 3) & 0x03;
+    return;
+  }
+
   writeMotor4(
     HALF_STEP[motor4.sequenceIndex][0],
     HALF_STEP[motor4.sequenceIndex][1],
@@ -668,6 +782,18 @@ void stepMotor4Forward() {
 }
 
 void stepMotor4Backward() {
+  if (M4_USE_FULLSTEP_HIGH_TORQUE) {
+    const uint8_t index = static_cast<uint8_t>(motor4.sequenceIndex & 0x03);
+    writeMotor4(
+      FULL_STEP_DUAL[index][0],
+      FULL_STEP_DUAL[index][1],
+      FULL_STEP_DUAL[index][2],
+      FULL_STEP_DUAL[index][3]
+    );
+    motor4.sequenceIndex = (index + 1) & 0x03;
+    return;
+  }
+
   writeMotor4(
     HALF_STEP[motor4.sequenceIndex][0],
     HALF_STEP[motor4.sequenceIndex][1],
@@ -708,112 +834,138 @@ float mapPulseCount(const PulseMap* table, size_t length, uint8_t pulses) {
   return 0.0f;
 }
 
-// Try to connect to ssid/pass synchronously, blocking up to timeoutMs.
-bool tryWifiConnect(const char* ssid, const char* pass, unsigned long timeoutMs) {
-  if (ssid == nullptr || ssid[0] == '\0') return false;
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(false, true);
-  delay(50);
-  WiFi.begin(ssid, pass);
-  Serial.print(F("Connecting to WiFi ssid="));
-  Serial.println(ssid);
-  const unsigned long startedMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedMs < timeoutMs) {
-    delay(100);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print(F("WiFi connected: "));
-    Serial.println(WiFi.localIP());
-    return true;
-  }
-  return false;
-}
-
-bool ensureWifi() {
-  if (DEPOSIT_API_URL[0] == '\0') {
+bool postJsonToCloud(const char* url, const String& payload) {
+  if (!CLOUD_API_ENABLED || WiFi.status() != WL_CONNECTED) {
     return false;
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
 
-  const unsigned long nowMs = millis();
-  if (nowMs - lastWifiAttemptMs < 5000) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setConnectTimeout(1000);
+  http.setTimeout(2000);
+
+  if (!http.begin(client, url)) {
+    Serial.print(F("HTTP begin failed url="));
+    Serial.println(url);
     return false;
   }
-  lastWifiAttemptMs = nowMs;
 
-  // First try the active runtime credentials (NVS-saved or default fallback).
-  if (runtimeWifiSsid.length() > 0) {
-    if (tryWifiConnect(runtimeWifiSsid.c_str(), runtimeWifiPassword.c_str(), 5000)) {
-      return true;
-    }
-  }
-
-  // If the active creds fail and they aren't already the hardcoded fallback,
-  // try the fallback (CASHWIFI). This is the customer-recovery path: power up
-  // a phone hotspot named CASHWIFI/CASH12345! and the device will reconnect
-  // even if a previously-saved SSID is no longer reachable.
-  if (runtimeWifiSsid != WIFI_SSID) {
-    Serial.print(F("WiFi primary failed; trying fallback ssid="));
-    Serial.println(WIFI_SSID);
-    if (tryWifiConnect(WIFI_SSID, WIFI_PASSWORD, 5000)) {
-      return true;
-    }
-  }
-
-  Serial.println(F("WiFi not connected"));
-  return false;
-}
-
-// Load WiFi credentials from non-volatile storage (NVS). Returns true if a
-// non-empty SSID was loaded; otherwise the compile-time defaults remain.
-void loadWifiCredentials() {
-  Preferences prefs;
-  if (!prefs.begin("atm-wifi", true)) {
-    Serial.println(F("WIFI prefs begin (read) failed; using defaults"));
-    return;
-  }
-  String savedSsid = prefs.getString("ssid", "");
-  String savedPass = prefs.getString("pass", "");
-  prefs.end();
-  if (savedSsid.length() > 0) {
-    runtimeWifiSsid = savedSsid;
-    runtimeWifiPassword = savedPass;
-    Serial.print(F("WIFI loaded from NVS ssid="));
-    Serial.println(runtimeWifiSsid);
-  } else {
-    Serial.print(F("WIFI no NVS creds; default ssid="));
-    Serial.println(runtimeWifiSsid);
-  }
-}
-
-// Persist new WiFi credentials to NVS so they survive reboot.
-bool saveWifiCredentials(const String& ssid, const String& pass) {
-  Preferences prefs;
-  if (!prefs.begin("atm-wifi", false)) {
-    Serial.println(F("ERR wifi prefs begin (write) failed"));
+  http.addHeader(F("Content-Type"), F("application/json"));
+  const int code = http.POST(payload);
+  if (code < 200 || code >= 300) {
+    Serial.print(F("HTTP POST fail code="));
+    Serial.print(code);
+    Serial.print(F(" url="));
+    Serial.println(url);
+    http.end();
     return false;
   }
-  prefs.putString("ssid", ssid);
-  prefs.putString("pass", pass);
-  prefs.end();
+
+  http.end();
   return true;
 }
 
-// Apply new WiFi credentials at runtime: persist + disconnect + reconnect on
-// next ensureWifi() tick. Used by the SETWIFI command from the dashboard.
-void applyNewWifiCredentials(const String& ssid, const String& pass) {
-  Serial.print(F("WIFI updating ssid="));
-  Serial.println(ssid);
-  if (!saveWifiCredentials(ssid, pass)) {
+void dispatchCloudCommands(const String& jsonBody) {
+  const int commandsKey = jsonBody.indexOf(F("\"commands\""));
+  if (commandsKey < 0) {
     return;
   }
-  runtimeWifiSsid = ssid;
-  runtimeWifiPassword = pass;
-  WiFi.disconnect(false, true);
-  lastWifiAttemptMs = 0;
-  Serial.println(F("WIFI credentials saved; reconnect pending"));
+  const int arrayStart = jsonBody.indexOf('[', commandsKey);
+  if (arrayStart < 0) {
+    return;
+  }
+
+  int i = arrayStart + 1;
+  while (i < jsonBody.length()) {
+    while (i < jsonBody.length() &&
+           (jsonBody.charAt(i) == ' ' || jsonBody.charAt(i) == '\t' ||
+            jsonBody.charAt(i) == '\r' || jsonBody.charAt(i) == '\n' ||
+            jsonBody.charAt(i) == ',')) {
+      ++i;
+    }
+
+    if (i >= jsonBody.length() || jsonBody.charAt(i) == ']') {
+      break;
+    }
+    if (jsonBody.charAt(i) != '"') {
+      ++i;
+      continue;
+    }
+
+    ++i;
+    String cmd = "";
+    bool escape = false;
+    while (i < jsonBody.length()) {
+      const char ch = jsonBody.charAt(i++);
+      if (escape) {
+        switch (ch) {
+          case 'n': cmd += '\n'; break;
+          case 'r': cmd += '\r'; break;
+          case 't': cmd += '\t'; break;
+          case '"': cmd += '"'; break;
+          case '\\': cmd += '\\'; break;
+          default: cmd += ch; break;
+        }
+        escape = false;
+        continue;
+      }
+      if (ch == '\\') {
+        escape = true;
+        continue;
+      }
+      if (ch == '"') {
+        break;
+      }
+      cmd += ch;
+    }
+
+    cmd.trim();
+    if (cmd.length() > 0) {
+      Serial.print(F("CLOUD CMD: "));
+      Serial.println(cmd);
+      handleUsbCommand(cmd);
+    }
+  }
+}
+
+void serviceCloudCommandPoll() {
+  if (!CLOUD_API_ENABLED || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Keep motor stepping smooth: skip blocking cloud poll while dispensing.
+  if (remoteTaskActive || motor4Job.active || coinServoJob.active) {
+    return;
+  }
+
+  const unsigned long nowMs = millis();
+  if (nowMs - lastCloudCommandPollMs < CLOUD_COMMAND_POLL_INTERVAL_MS) {
+    return;
+  }
+  // Stamp AFTER the call so the 500 ms gap is measured from the END of the
+  // HTTP transaction, not from the start. This prevents back-to-back blocking
+  // calls when Railway is slow or times out.
+  lastCloudCommandPollMs = millis();
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setConnectTimeout(1000);
+  http.setTimeout(2000);
+
+  if (!http.begin(client, CLOUD_COMMAND_API)) {
+    lastCloudCommandPollMs = millis();
+    return;
+  }
+
+  const int code = http.GET();
+  if (code == 200) {
+    const String body = http.getString();
+    dispatchCloudCommands(body);
+  }
+  http.end();
+  lastCloudCommandPollMs = millis();
 }
 
 void postDeposit(float amount, const char* source, uint8_t pulses) {
@@ -826,277 +978,38 @@ void postDeposit(float amount, const char* source, uint8_t pulses) {
   Serial.print(F(" amount="));
   Serial.println(amount, 2);
 
-  if (!ensureWifi()) {
-    Serial.println(F("ERR: WiFi not connected"));
-    return;
-  }
-
-  Serial.print(F("WiFi status: "));
-  Serial.print(WiFi.status());
-  Serial.print(F(" IP: "));
-  Serial.println(WiFi.localIP());
-
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure(); // skip cert verification
-
-  HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
-  
-  Serial.print(F("POSTing to: "));
-  Serial.println(DEPOSIT_API_URL);
-  
-  if (!http.begin(secureClient, DEPOSIT_API_URL)) {
-    Serial.println(F("ERR: http.begin() failed"));
-    http.end();
-    return;
-  }
-  
-  http.addHeader("Content-Type", "application/json");
-  const String body = String("{\"amount\":") + String(amount, 2) +
-                      String(",\"source\":\"") + String(source) +
-                      String("\",\"pulses\":") + String(pulses) +
-                      String("}");
-  
-  Serial.print(F("POST body: "));
-  Serial.println(body);
-  
-  const int status = http.POST(body);
-  Serial.print(F("HTTP deposit status="));
-  Serial.println(status);
-  
-  if (status < 0) {
-    Serial.print(F("ERR: HTTP error: "));
-    Serial.println(http.errorToString(status));
-  } else if (status == 200) {
-    Serial.println(F("OK: deposit received by server"));
-  }
-  
-  http.end();
+  String payload = F("{\"amount\":");
+  payload += String(amount, 2);
+  payload += F(",\"source\":\"");
+  payload += source;
+  payload += F("\"}");
+  postJsonToCloud(CLOUD_DEPOSIT_API, payload);
 }
 
 void postWithdrawStatus(const char* state, int amount, bool active) {
-  if (!ensureWifi()) {
-    Serial.println(F("ERR: WiFi not connected"));
-    return;
-  }
-
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
-
-  HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
-
-  if (!http.begin(secureClient, DEVICE_STATUS_API_URL)) {
-    Serial.println(F("ERR: status http.begin() failed"));
-    http.end();
-    return;
-  }
-
-  http.addHeader("Content-Type", "application/json");
-  const String body = String("{\"withdrawActive\":") + (active ? F("true") : F("false")) +
-                      String(",\"withdrawState\":\"") + String(state) +
-                      String("\",\"withdrawAmount\":") + String(amount) +
-                      String("}");
-
-  Serial.print(F("POST withdraw status state="));
-  Serial.println(state);
-  const int status = http.POST(body);
-  Serial.print(F("HTTP status status="));
-  Serial.println(status);
-  http.end();
+  String payload = F("{\"withdrawActive\":");
+  payload += (active ? F("true") : F("false"));
+  payload += F(",\"withdrawState\":\"");
+  payload += state;
+  payload += F("\",\"withdrawAmount\":");
+  payload += String(amount);
+  payload += F("}");
+  postJsonToCloud(CLOUD_DEVICE_STATUS_API, payload);
 }
 
-void pollRemoteCommands() {
-  if (COMMAND_API_URL[0] == '\0') {
-    return;
-  }
-
-  const unsigned long nowMs = millis();
-
-  // Never block pulse-sensitive paths while acceptor pulses are in progress.
-  if (coinInput.pulseActive || billInput.pulseActive || coinInput.pending || billInput.pending) {
-    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
-      lastCommandSkipLogMs = nowMs;
-      Serial.print(F("CMD POLL skip=pulse-active coinActive="));
-      Serial.print(coinInput.pulseActive ? F("1") : F("0"));
-      Serial.print(F(" billActive="));
-      Serial.print(billInput.pulseActive ? F("1") : F("0"));
-      Serial.print(F(" coinPending="));
-      Serial.print(coinInput.pending ? F("1") : F("0"));
-      Serial.print(F(" billPending="));
-      Serial.println(billInput.pending ? F("1") : F("0"));
-    }
-    return;
-  }
-
-  // Avoid extra network activity while local motion tasks are active.
-  if (coinServoJob.active || motor4Job.active || withdrawJob.active || billRoute.active) {
-    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
-      lastCommandSkipLogMs = nowMs;
-      Serial.print(F("CMD POLL skip=motion-active local="));
-      Serial.print(coinServoJob.active ? F("1") : F("0"));
-      Serial.print(F(" m4="));
-      Serial.print(motor4Job.active ? F("1") : F("0"));
-      Serial.print(F(" withdraw="));
-      Serial.print(withdrawJob.active ? F("1") : F("0"));
-      Serial.print(F(" route="));
-      Serial.println(billRoute.active ? F("1") : F("0"));
-    }
-    return;
-  }
-
-  if (!ensureWifi()) {
-    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
-      lastCommandSkipLogMs = nowMs;
-      Serial.println(F("CMD POLL skip=wifi-disconnected"));
-    }
-    return;
-  }
-
-  const unsigned long pollDelayMs = commandPollFailures > 0 ? COMMAND_POLL_RETRY_MS : COMMAND_POLL_MS;
-  if (nowMs - lastCommandPollMs < pollDelayMs) {
-    if (COMMAND_POLL_VERBOSE && (nowMs - lastCommandSkipLogMs >= COMMAND_SKIP_LOG_MS)) {
-      lastCommandSkipLogMs = nowMs;
-      Serial.print(F("CMD POLL wait remainingMs="));
-      Serial.println(pollDelayMs - (nowMs - lastCommandPollMs));
-    }
-    return;
-  }
-  lastCommandPollMs = nowMs;
-
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure(); // skip cert verification
-
-  HTTPClient http;
-  http.setConnectTimeout(COMMAND_HTTP_TIMEOUT_MS);
-  http.setTimeout(COMMAND_HTTP_TIMEOUT_MS);
-
-  String url = String(COMMAND_API_URL);
-  if (url.indexOf('?') >= 0) {
-    url += "&consume=true";
-  } else {
-    url += "?consume=true";
-  }
-
-  if (!http.begin(secureClient, url)) {
-    Serial.println(F("ERR: command http.begin() failed"));
-    http.end();
-    return;
-  }
-
-  const int status = http.GET();
-  if (status != 200) {
-    Serial.print(F("WARN: command HTTP poll failed count="));
-    Serial.print(commandPollFailures + 1);
-    Serial.print(F(" err="));
-    if (status < 0) {
-      Serial.println(http.errorToString(status));
-    } else {
-      Serial.println(status);
-    }
-    commandPollFailures = static_cast<uint8_t>(min<int>(commandPollFailures + 1, 10));
-    lastCommandPollErrorMs = nowMs;
-    http.end();
-    return;
-  }
-
-  if (commandPollFailures > 0) {
-    commandPollFailures = 0;
-  }
-
-  const String payload = http.getString();
-  http.end();
-
-  if (COMMAND_POLL_VERBOSE) {
-    Serial.print(F("CMD POLL payload="));
-    Serial.println(payload);
-  }
-
-  bool handledCommand = false;
-  const int keyIndex = payload.indexOf("\"commands\"");
-  if (keyIndex >= 0) {
-    const int listStart = payload.indexOf('[', keyIndex);
-    const int listEnd = payload.indexOf(']', listStart);
-    if (listStart >= 0 && listEnd >= 0 && listEnd > listStart) {
-      int scan = listStart + 1;
-      while (scan < listEnd) {
-        const int open = payload.indexOf('"', scan);
-        if (open < 0 || open >= listEnd) {
-          break;
-        }
-
-        String cmd;
-        bool escaping = false;
-        int close = open + 1;
-        for (; close < listEnd; ++close) {
-          const char ch = payload.charAt(close);
-          if (escaping) {
-            cmd += ch;
-            escaping = false;
-            continue;
-          }
-          if (ch == '\\') {
-            escaping = true;
-            continue;
-          }
-          if (ch == '"') {
-            break;
-          }
-          cmd += ch;
-        }
-
-        if (close >= listEnd) {
-          break;
-        }
-
-        cmd.trim();
-        if (cmd.length() > 0) {
-          Serial.print(F("REMOTE CMD: "));
-          Serial.println(cmd);
-          handleUsbCommand(cmd);
-          handledCommand = true;
-        }
-
-        scan = close + 1;
-      }
-    }
-  }
-
-  // Compatibility fallback in case backend returns a single command string.
-  if (!handledCommand) {
-    const int singleKey = payload.indexOf("\"command\"");
-    if (singleKey >= 0) {
-      const int colon = payload.indexOf(':', singleKey);
-      const int firstQuote = payload.indexOf('"', colon + 1);
-      const int secondQuote = payload.indexOf('"', firstQuote + 1);
-      if (colon >= 0 && firstQuote >= 0 && secondQuote > firstQuote) {
-        String cmd = payload.substring(firstQuote + 1, secondQuote);
-        cmd.trim();
-        if (cmd.length() > 0) {
-          Serial.print(F("REMOTE CMD: "));
-          Serial.println(cmd);
-          handleUsbCommand(cmd);
-          handledCommand = true;
-        }
-      }
-    }
-  }
-
-  if (COMMAND_POLL_VERBOSE && !handledCommand) {
-    Serial.println(F("CMD POLL no command"));
-  }
-}
-
-// Slow continuous-rotation pulse widths used by the storage spinners
-// (channels 0..4) so all 5 spinners run at the same gentle speed as the
-// validated spinner-1 standalone test (forward=1300us, reverse=1700us,
-// stop=1500us). Lift (CH5) and output spinner (CH6) keep the raw angle
-// path because they use intermediate angles for tuning.
-constexpr int STORAGE_SPINNER_FORWARD_US = 1300;
-constexpr int STORAGE_SPINNER_REVERSE_US = 1700;
+// Continuous-rotation pulse widths used by the storage spinners (CH0..CH4).
+// Use a wider range so motors reliably leave neutral deadband across servo
+// brands: forward=1100us, reverse=1900us, stop=1500us.
+constexpr int STORAGE_SPINNER_FORWARD_US = 1100;
+constexpr int STORAGE_SPINNER_REVERSE_US = 1900;
 constexpr int STORAGE_SPINNER_STOP_US    = 1500;
+
+uint16_t pcaOffCountFromPulseUs(int pulseUs) {
+  if (pulseUs < 500) pulseUs = 500;
+  if (pulseUs > 2500) pulseUs = 2500;
+  // 20ms frame at 50Hz and 4096 ticks per frame.
+  return static_cast<uint16_t>((static_cast<uint32_t>(pulseUs) * 4096UL) / 20000UL);
+}
 
 void setServoAngle(uint8_t channel, uint8_t angle) {
   if (!SERVOS_ENABLED) {
@@ -1111,34 +1024,35 @@ void setServoAngle(uint8_t channel, uint8_t angle) {
   if (angle > 180) {
     angle = 180;
   }
-  attachChannelServo(channel);
+  int pulseUs = 1500;
   // Storage spinners (CH0..CH4): translate logical angles into the slow
   // pulse widths so all spinners match spinner 1's speed.
   if (channel < STORAGE_SLOT_COUNT) {
-    int us = STORAGE_SPINNER_STOP_US;
+    pulseUs = STORAGE_SPINNER_STOP_US;
     if (angle == SPINNER_RUN_CMD) {            // 180 -> forward
-      us = STORAGE_SPINNER_FORWARD_US;
+      pulseUs = STORAGE_SPINNER_FORWARD_US;
     } else if (angle == SPINNER_WITHDRAW_CMD) { // 0 -> reverse
-      us = STORAGE_SPINNER_REVERSE_US;
+      pulseUs = STORAGE_SPINNER_REVERSE_US;
     } else if (angle == SERVO_STOP_CMD) {       // 90 -> stop
-      us = STORAGE_SPINNER_STOP_US;
+      pulseUs = STORAGE_SPINNER_STOP_US;
     } else {
       // Linear interpolation for STORAGE <slot> <cmd0..180> raw values:
       // 0 -> REVERSE_US, 90 -> STOP_US, 180 -> FORWARD_US
       if (angle < SERVO_STOP_CMD) {
-        us = STORAGE_SPINNER_STOP_US +
+        pulseUs = STORAGE_SPINNER_STOP_US +
              ((int)(STORAGE_SPINNER_REVERSE_US - STORAGE_SPINNER_STOP_US) *
               (int)(SERVO_STOP_CMD - angle)) / (int)SERVO_STOP_CMD;
       } else {
-        us = STORAGE_SPINNER_STOP_US +
+        pulseUs = STORAGE_SPINNER_STOP_US +
              ((int)(STORAGE_SPINNER_FORWARD_US - STORAGE_SPINNER_STOP_US) *
               (int)(angle - SERVO_STOP_CMD)) / (int)SERVO_STOP_CMD;
       }
     }
-    channelServos[channel].writeMicroseconds(us);
-    return;
+  } else {
+    pulseUs = map(angle, 0, 180, 500, 2500);
   }
-  channelServos[channel].write(angle);
+
+  pcaSetPwm(channel, 0, pcaOffCountFromPulseUs(pulseUs));
 }
 
 void homeServos() {
@@ -1460,13 +1374,13 @@ void runStorageTest(uint8_t slot) {
   Serial.print(slot + 1);
   Serial.println(F(" FORWARD"));
   setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_RUN_CMD));
-  delay(withdrawSpinMsForSlot(slot + 1));
+  delay(withdrawForwardMsForSlot(slot));
 
   Serial.print(F("STORAGETEST slot="));
   Serial.print(slot + 1);
   Serial.println(F(" BACKWARD"));
   setServoAngle(storageChannelForSlot(slot), storageCommandForSlot(slot, SPINNER_WITHDRAW_CMD));
-  delay(WITHDRAW_REVERSE_MS);
+  delay(withdrawReverseMsForSlot(slot));
 
   stopStorageMotor(slot);
   Serial.print(F("STORAGETEST slot="));
@@ -1487,6 +1401,7 @@ void printStorageConfig() {
 }
 
 void finishBillRoute(const __FlashStringHelper* result) {
+  const uint8_t finishedTargetSlot = billRoute.targetSlot;
   setLiftCommand(SERVO_STOP_CMD);
   stopElevatorOutMotor();
   stopStorageMotor(billRoute.targetSlot);
@@ -1494,6 +1409,13 @@ void finishBillRoute(const __FlashStringHelper* result) {
   Serial.println(result);
   popBillSlot();
   billRoute = {};
+
+  // After each bill route cycle, always return to IR5-1 so the elevator is
+  // ready to accept the next bill deposit.
+  if (finishedTargetSlot != 0 && !withdrawJob.active) {
+    Serial.println(F("BILL ROUTE AUTO RETURN IR5-1"));
+    startLiftToIr51Sequence(F("BILL_DONE"));
+  }
 }
 
 void serviceBillRoute() {
@@ -1580,13 +1502,23 @@ void popQueueFront() {
   --taskCount;
 }
 
+void sendEsp2Command(const String& cmd) {
+  RaspiSerial.println(cmd);
+  Serial.print(F("ESP2<="));
+  Serial.println(cmd);
+}
+
 void startLocalMotor4(uint8_t count) {
   motor4Job.active = true;
   motor4Job.requestedCount = count;
   motor4Job.dispensedCount = 0;
-  m4IrBaselineLevel = digitalRead(M4_IR_PIN);
+  motor4.sequenceIndex = 0;
+  m4IrBaselineLevel = sampleM4IrBaselineLevel();
+  m4IrLatchedDetect = false;
+  m4IrMonitorActive = true;
   motor4Job.sensorArmed = !isM4IrDetected();
   motor4Job.goingForward = true;
+  motor4Job.sawDetectThisCycle = false;
   motor4Job.startedMs = millis();
   motor4Job.coinDeadlineMs = motor4Job.startedMs + JOB_MAX_RUNTIME_MS;
   motor4Job.phaseStartedMs = motor4Job.startedMs;
@@ -1626,15 +1558,11 @@ void startNextQueuedTask() {
     return;
   }
 
-  UnoSerial.print('@');
-  UnoSerial.print(F("DISPENSE "));
-  UnoSerial.print(nextTask.motor);
-  UnoSerial.print(' ');
-  UnoSerial.println(nextTask.count);
-  Serial.print(F(">UNO>@DISPENSE "));
-  Serial.print(nextTask.motor);
-  Serial.print(' ');
-  Serial.println(nextTask.count);
+  String cmd = F("DISPENSE ");
+  cmd += String(nextTask.motor);
+  cmd += ' ';
+  cmd += String(nextTask.count);
+  sendEsp2Command(cmd);
   remoteTaskActive = true;
   remoteTaskSentMs = millis();
   remoteTaskMotor = nextTask.motor;
@@ -1643,8 +1571,8 @@ void startNextQueuedTask() {
   Serial.print(nextTask.motor);
   Serial.print(F(" count="));
   Serial.print(nextTask.count);
-  Serial.print(F(" unoOnline="));
-  Serial.println(unoOnline ? F("1") : F("0"));
+  Serial.print(F(" esp2Online="));
+  Serial.println(esp2Online ? F("1") : F("0"));
 }
 
 void stopAllDispense() {
@@ -1660,9 +1588,7 @@ void stopAllDispense() {
     return;
   }
   releaseMotor4();
-  UnoSerial.print('@');
-  UnoSerial.println(F("STOP"));
-  Serial.println(F(">UNO>@STOP"));
+  sendEsp2Command(F("STOP"));
   Serial.println(F("OK STOP"));
 }
 
@@ -1671,7 +1597,7 @@ void printHelp() {
   Serial.println(F("  ARM"));
   Serial.println(F("  DISARM"));
   Serial.println(F("  STATUS"));
-  Serial.println(F("  PINGUNO"));
+  Serial.println(F("  PINGESP2"));
   Serial.println(F("  DISPENSE <motor 1..4> <count>"));
   Serial.println(F("  PAYOUT <amount>"));
   Serial.println(F("  WITHDRAW <amount>  (20/50/100/500/1000 denominations)"));
@@ -1681,6 +1607,7 @@ void printHelp() {
   Serial.println(F("  LIFTSTOP"));
   Serial.println(F("  LIFTTO1"));
   Serial.println(F("  IR5-1 .. IR5-5"));
+  Serial.println(F("  FLOORTEST <slot1to5|ALL>  (instant stop on IR detect)"));
   Serial.println(F("  LIFTTEST (IR5-1 -> IR5-5 sequence)"));
   Serial.println(F("  PULSEDEBUG"));
   Serial.println(F("  DIAGBILL"));
@@ -1695,7 +1622,14 @@ void printHelp() {
   Serial.println(F("  STORAGECONF"));
   Serial.println(F("  STORAGEMAP <slot1to5> <channel0to4>"));
   Serial.println(F("  STORAGEINV <slot1to5> <0|1>"));
-  Serial.println(F("  SERVO <channel> <angle>"));
+  Serial.println(F("  SERVO_TEST <slot1to5|channel0to6> <FORWARD|BACKWARD> [duration]"));
+  Serial.println(F("    duration ex: 10000, 10000MS, 10S, 10SEC (default 3000ms)"));
+  Serial.println(F("  ELEVATOR_TEST <FORWARD|BACKWARD> [duration]"));
+  Serial.println(F("  OUTPUT_TEST <FORWARD|BACKWARD> [duration]"));
+  Serial.println(F("  MOTOR <channel> <cmd0to180>"));
+  Serial.println(F("    90=stop, >90 one direction, <90 opposite direction"));
+  Serial.println(F("  PWMUS <channel> <us500to2500>"));
+  Serial.println(F("  PCAREGS [channel0to6]"));
   Serial.println(F("  HOME"));
   Serial.println(F("  STOP"));
   Serial.println(F("  HELP"));
@@ -1966,6 +1900,55 @@ bool moveLiftDirectToSlot(uint8_t slot) {
   return true;
 }
 
+bool moveLiftDirectToSlotInstantStop(uint8_t slot) {
+  if (slot > 4) {
+    return false;
+  }
+
+  const int8_t currentSlot = currentIr5Slot();
+  if (currentSlot == static_cast<int8_t>(slot)) {
+    stopElevatorPark();
+    setLiftCommand(SERVO_STOP_CMD);
+    Serial.print(F("OK FLOORTEST IR5-"));
+    Serial.print(slot + 1);
+    Serial.println(F(" already (stopped)"));
+    return true;
+  }
+
+  uint8_t moveCommand = ELEVATOR_LIFT_DOWN_CMD;
+  if (currentSlot >= 0) {
+    moveCommand = (slot < static_cast<uint8_t>(currentSlot)) ? ELEVATOR_LIFT_UP_CMD : ELEVATOR_LIFT_DOWN_CMD;
+  } else if (slot == 0) {
+    moveCommand = ELEVATOR_LIFT_UP_CMD;
+  }
+
+  Serial.print(F("FLOORTEST MOVE IR5-"));
+  Serial.println(slot + 1);
+  if (!validateLiftDirection(moveCommand, slot)) {
+    Serial.print(F("ERR FLOORTEST IR5-"));
+    Serial.print(slot + 1);
+    Serial.println(F(" direction invalid (at limit)"));
+    return false;
+  }
+
+  if (!moveLiftToIr5Slot(slot, moveCommand, ELEVATOR_SLOT_MOVE_TIMEOUT_MS)) {
+    stopElevatorPark();
+    setLiftCommand(SERVO_STOP_CMD);
+    Serial.print(F("ERR FLOORTEST IR5-"));
+    Serial.print(slot + 1);
+    Serial.println(F(" timeout"));
+    return false;
+  }
+
+  // Test mode requirement: stop immediately on detection, do not engage park-hold.
+  stopElevatorPark();
+  setLiftCommand(SERVO_STOP_CMD);
+  Serial.print(F("OK FLOORTEST IR5-"));
+  Serial.print(slot + 1);
+  Serial.println(F(" stopped"));
+  return true;
+}
+
 void runLiftTest() {
   if (!SERVOS_ENABLED) {
     Serial.println(F("ERR servos-disabled"));
@@ -2015,8 +1998,8 @@ void runLiftTest() {
 
 void printStatus() {
   const int8_t currentSlot = currentIr5Slot();
-  Serial.print(F("STATUS uno="));
-  Serial.print(unoOnline ? F("online") : F("offline"));
+  Serial.print(F("STATUS esp2="));
+  Serial.print(esp2Online ? F("online") : F("offline"));
   Serial.print(F(" armed="));
   Serial.print(motionArmed ? F("1") : F("0"));
   Serial.print(F(" queue="));
@@ -2318,8 +2301,7 @@ void serviceLiftToIr51() {
 
 void finalizePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
   float amount = mapPulseCount(map, length, input.pulseCount);
-  // Bill acceptor reports double the actual cash value; halve before posting.
-  if (amount > 0.0f && input.name[0] == 'b') {
+  if (amount > 0.0f && input.name[0] == 'b' && BILL_AMOUNT_HALVE_AFTER_MAP) {
     amount = amount / 2.0f;
   }
   if (amount > 0.0f) {
@@ -2350,12 +2332,50 @@ void finalizePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
 // The bill acceptor's pulse stream can be missed when loop() is busy with
 // HTTP work or motor delay() calls. Capture every edge in an ISR and only
 // run the final idle-gap commit from the main loop.
+volatile uint8_t       coinIsrPulseCount     = 0;
+volatile bool          coinIsrPending        = false;
+volatile unsigned long coinIsrLastEdgeMs     = 0;
+volatile unsigned long coinIsrPulseStartedMs = 0;
+volatile bool          coinIsrPulseActive    = false;
+volatile bool          coinIsrLastLevel      = true; // pulled-up idle = HIGH
+
 volatile uint8_t       billIsrPulseCount     = 0;
 volatile bool          billIsrPending        = false;
 volatile unsigned long billIsrLastEdgeMs     = 0;
 volatile unsigned long billIsrPulseStartedMs = 0;
 volatile bool          billIsrPulseActive    = false;
 volatile bool          billIsrLastLevel      = true; // pulled-up idle = HIGH
+
+void IRAM_ATTR onCoinPinChange() {
+  const bool level = (digitalRead(COIN_PIN) == HIGH);
+  const unsigned long nowMs = millis();
+
+  const bool startEdge = PULSE_ACTIVE_LOW
+                            ? (coinIsrLastLevel && !level)
+                            : (!coinIsrLastLevel && level);
+  const bool endEdge   = PULSE_ACTIVE_LOW
+                            ? (!coinIsrLastLevel && level)
+                            : (coinIsrLastLevel && !level);
+
+  if (startEdge) {
+    coinIsrPulseActive = true;
+    coinIsrPulseStartedMs = nowMs;
+  }
+
+  if (endEdge && coinIsrPulseActive) {
+    const unsigned long widthMs = nowMs - coinIsrPulseStartedMs;
+    coinIsrPulseActive = false;
+    if (widthMs >= PULSE_MIN_WIDTH_MS &&
+        widthMs <= PULSE_MAX_WIDTH_MS &&
+        (nowMs - coinIsrLastEdgeMs) > PULSE_MIN_EDGE_GAP_MS) {
+      ++coinIsrPulseCount;
+      coinIsrPending = true;
+      coinIsrLastEdgeMs = nowMs;
+    }
+  }
+
+  coinIsrLastLevel = level;
+}
 
 void IRAM_ATTR onBillPinChange() {
   const bool level = (digitalRead(BILL_PIN) == HIGH);
@@ -2389,6 +2409,38 @@ void IRAM_ATTR onBillPinChange() {
 }
 
 void servicePulseInput(PulseInput& input, const PulseMap* map, size_t length) {
+  // Coin input is fully ISR-driven; the loop only commits after idle gap.
+  if (input.pin == COIN_PIN) {
+    const unsigned long nowMs = millis();
+    // Stuck-active recovery (matches polled path).
+    if (coinIsrPulseActive &&
+        (nowMs - coinIsrPulseStartedMs) > (PULSE_MAX_WIDTH_MS + 100)) {
+      noInterrupts();
+      coinIsrPulseActive = false;
+      interrupts();
+    }
+    // Atomic snapshot.
+    noInterrupts();
+    const bool          pending  = coinIsrPending;
+    const uint8_t       count    = coinIsrPulseCount;
+    const unsigned long lastEdge = coinIsrLastEdgeMs;
+    interrupts();
+
+    if (pending && (nowMs - lastEdge) >= input.idleGapMs) {
+      // Sync into the PulseInput struct so finalize prints/logs work.
+      input.pulseCount = count;
+      input.pending = true;
+      input.lastEdgeMs = lastEdge;
+      finalizePulseInput(input, map, length);
+      // Reset ISR state to mirror the finalize.
+      noInterrupts();
+      coinIsrPending = false;
+      coinIsrPulseCount = 0;
+      interrupts();
+    }
+    return;
+  }
+
   // Bill input is fully ISR-driven; the loop only commits after idle gap.
   if (input.pin == BILL_PIN) {
     const unsigned long nowMs = millis();
@@ -2530,16 +2582,48 @@ void serviceIr5Sensors() {
   }
 }
 
+void postWithdrawCompleteIfAllDispenseIdle() {
+  const bool allDispenseIdle =
+    (taskCount == 0) &&
+    !remoteTaskActive &&
+    !coinServoJob.active &&
+    !motor4Job.active &&
+    !pendingWithdraw.active &&
+    !withdrawJob.active;
+
+  if (allDispenseIdle) {
+    postWithdrawStatus("complete", 0, false);
+    Serial.println(F("WITHDRAW status=complete (all dispense tasks done)"));
+  }
+}
+
 void finishLocalMotor4() {
   const uint8_t dispensed = motor4Job.dispensedCount;
+  m4IrMonitorActive = false;
+  m4IrLatchedDetect = false;
+
+  // After successful dispense, retract motor 4 backward for 10s.
+  const unsigned long retractStartedMs = millis();
+  unsigned long retractLastStepUs = micros();
+  while (millis() - retractStartedMs < M4_BACKWARD_RUN_MS) {
+    const unsigned long nowUs = micros();
+    if (nowUs - retractLastStepUs >= M4_STEP_INTERVAL_US) {
+      retractLastStepUs = nowUs;
+      stepMotor4Backward();
+    }
+  }
+
   motor4Job = {};
   releaseMotor4();
   Serial.print(F("DONE motor=4 count="));
   Serial.println(dispensed);
   popQueueFront();
+  postWithdrawCompleteIfAllDispenseIdle();
 }
 
 void failLocalMotor4(const __FlashStringHelper* reason) {
+  m4IrMonitorActive = false;
+  m4IrLatchedDetect = false;
   motor4Job = {};
   releaseMotor4();
   Serial.print(F("ERR motor=4 reason="));
@@ -2559,6 +2643,7 @@ void finishLocalCoinServoJob() {
   Serial.print(F(" count="));
   Serial.println(dispensed);
   popQueueFront();
+  postWithdrawCompleteIfAllDispenseIdle();
 }
 
 void failLocalCoinServoJob(const __FlashStringHelper* reason) {
@@ -2664,6 +2749,23 @@ void serviceLocalMotor4() {
   if (nowMs - motor4Job.phaseStartedMs >= phaseRunMs) {
     motor4Job.goingForward = !motor4Job.goingForward;
     motor4Job.phaseStartedMs = nowMs;
+
+    // One full cycle completed when we transition BWD -> FWD.
+    if (motor4Job.goingForward) {
+      if (M4_ENABLE_CYCLE_FALLBACK && !motor4Job.sawDetectThisCycle) {
+        ++motor4Job.dispensedCount;
+        motor4Job.sensorArmed = false;
+        motor4Job.detectStartedMs = 0;
+        Serial.print(F("WARN M4 fallback cycle-count dispensed="));
+        Serial.println(motor4Job.dispensedCount);
+        if (motor4Job.dispensedCount >= motor4Job.requestedCount) {
+          finishLocalMotor4();
+          return;
+        }
+      }
+      motor4Job.sawDetectThisCycle = false;
+    }
+
     Serial.print(F("M4 PHASE="));
     Serial.println(motor4Job.goingForward ? F("FWD") : F("BWD"));
   }
@@ -2676,7 +2778,15 @@ void serviceLocalMotor4() {
     motor4Job.lastStepUs = nowUs;
   }
 
-  const bool detected = isM4IrDetected();
+  bool latchedDetect = false;
+  noInterrupts();
+  if (m4IrLatchedDetect) {
+    latchedDetect = true;
+    m4IrLatchedDetect = false;
+  }
+  interrupts();
+
+  const bool detected = isM4IrDetected() || latchedDetect;
   if (!motor4Job.sensorArmed) {
     if (!detected) {
       motor4Job.sensorArmed = true;
@@ -2686,15 +2796,20 @@ void serviceLocalMotor4() {
   }
 
   if (detected) {
-    // Count immediately on first beam-break edge so fast-falling coins are not missed.
+    // Stop as soon as IR detects a drop edge while armed.
     ++motor4Job.dispensedCount;
+    motor4Job.sawDetectThisCycle = true;
     motor4Job.sensorArmed = false;
     motor4Job.detectStartedMs = 0;
+    // Immediately retract so the pusher is ready for the next coin.
+    motor4Job.goingForward = false;
+    motor4Job.phaseStartedMs = nowMs;
     Serial.print(F("EVENT motor=4 dispensed="));
     Serial.println(motor4Job.dispensedCount);
 
     if (motor4Job.dispensedCount >= motor4Job.requestedCount) {
       finishLocalMotor4();
+      return;
     }
   } else {
     motor4Job.detectStartedMs = 0;
@@ -2747,6 +2862,51 @@ int sscanfValue(const String& cmd, const char* key) {
   return cmd.substring(valueStart, valueEnd).toInt();
 }
 
+bool parseDurationMsToken(String token, unsigned long& durationMs) {
+  token.trim();
+  if (token.length() == 0) {
+    return false;
+  }
+
+  String tokenUpper = token;
+  tokenUpper.toUpperCase();
+
+  unsigned long multiplier = 1;
+  if (tokenUpper.endsWith(F("MS"))) {
+    tokenUpper.remove(tokenUpper.length() - 2);
+  } else if (tokenUpper.endsWith(F("SEC"))) {
+    tokenUpper.remove(tokenUpper.length() - 3);
+    multiplier = 1000;
+  } else if (tokenUpper.endsWith(F("S"))) {
+    tokenUpper.remove(tokenUpper.length() - 1);
+    multiplier = 1000;
+  }
+
+  tokenUpper.trim();
+  if (tokenUpper.length() == 0) {
+    return false;
+  }
+
+  for (uint16_t i = 0; i < tokenUpper.length(); ++i) {
+    const char ch = tokenUpper.charAt(i);
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+  }
+
+  const unsigned long baseValue = static_cast<unsigned long>(tokenUpper.toInt());
+  if (baseValue == 0) {
+    return false;
+  }
+
+  durationMs = baseValue * multiplier;
+  if (durationMs < SERVO_TEST_MIN_MS || durationMs > SERVO_TEST_MAX_MS) {
+    return false;
+  }
+
+  return true;
+}
+
 // Withdrawal without recalculation - uses provided counts directly
 bool startWithdrawJobWithCounts(uint8_t counts[5]) {
   if (withdrawJob.active) { Serial.println(F("ERR withdraw-busy")); return false; }
@@ -2784,6 +2944,7 @@ bool startWithdrawJobWithCounts(uint8_t counts[5]) {
   if (withdrawJob.currentSlot >= 5) {
     // No bills to dispense
     withdrawJob.active = false;
+    withdrawJob.stage = WD_IDLE;
     Serial.println(F("WITHDRAW no bills to dispense"));
     postWithdrawStatus("complete", 0, false);
     return true;
@@ -2932,7 +3093,10 @@ bool startWithdrawJob(int amount) {
   postWithdrawStatus("dispensing", amount, true);
 
   withdrawJob.billsLeft = withdrawJob.slotCounts[withdrawJob.currentSlot];
-  setServoAngle(SPINNER_CHANNEL_MIN + withdrawJob.currentSlot, SPINNER_WITHDRAW_CMD);
+  setServoAngle(
+    storageChannelForSlot(withdrawJob.currentSlot),
+    storageCommandForSlot(withdrawJob.currentSlot, STORAGE_FORWARD_CMD)
+  );
   withdrawJob.stage = WD_SPIN_BILL;
   withdrawJob.stageStartedMs = withdrawJob.startedMs;
   Serial.print(F("WITHDRAW SPIN slot="));
@@ -2965,7 +3129,7 @@ void serviceWithdrawJob() {
       break;
     }
     case WD_SPIN_BILL: {
-      if (nowMs - withdrawJob.stageStartedMs >= withdrawSpinMsForSlot(withdrawJob.currentSlot)) {
+      if (nowMs - withdrawJob.stageStartedMs >= withdrawForwardMsForSlot(withdrawJob.currentSlot)) {
         // Reverse briefly so the next bill in the stack settles back into position.
         setServoAngle(
           storageChannelForSlot(withdrawJob.currentSlot),
@@ -2979,7 +3143,7 @@ void serviceWithdrawJob() {
       break;
     }
     case WD_REVERSE_BILL: {
-      if (nowMs - withdrawJob.stageStartedMs >= WITHDRAW_REVERSE_MS) {
+      if (nowMs - withdrawJob.stageStartedMs >= withdrawReverseMsForSlot(withdrawJob.currentSlot)) {
         stopStorageMotor(withdrawJob.currentSlot);
         --withdrawJob.billsLeft;
         Serial.print(F("WITHDRAW EJECTED slot="));
@@ -3025,9 +3189,13 @@ void handleUsbCommand(String command) {
   if (command.length() == 0) {
     return;
   }
-  // PC-bridge inbound: lines like "<UNO<PONG" are treated as if they came from UnoSerial.
-  if (command.startsWith("<UNO<")) {
-    handleUnoLine(command.substring(5));
+  // PC-bridge inbound: lines like "<ESP2<PONG" are treated as ESP2 replies.
+  if (command.startsWith("<ESP2<")) {
+    if (LEGACY_USB_BRIDGE_COMPAT) {
+      handleEsp2Line(command.substring(6));
+    } else {
+      Serial.println(F("WARN usb-bridge relay disabled; ignoring <ESP2<... line"));
+    }
     return;
   }
   String commandUpper = command;
@@ -3035,35 +3203,10 @@ void handleUsbCommand(String command) {
 
   if (commandUpper == F("STATUS")) {
     printStatus();
-    UnoSerial.print('@');
-    UnoSerial.println(F("STATUS"));
-    Serial.println(F(">UNO>@STATUS"));
+    sendEsp2Command(F("STATUS"));
     return;
   }
 
-  // SETWIFI ssid="..." pass="..."  -- update WiFi creds at runtime, persist to NVS.
-  if (commandUpper.startsWith(F("SETWIFI"))) {
-    auto extractQuoted = [&](const char* key) -> String {
-      int idx = command.indexOf(key);
-      if (idx < 0) return String();
-      int eq = command.indexOf('=', idx);
-      if (eq < 0) return String();
-      int q1 = command.indexOf('"', eq);
-      if (q1 < 0) return String();
-      int q2 = command.indexOf('"', q1 + 1);
-      if (q2 < 0) return String();
-      return command.substring(q1 + 1, q2);
-    };
-    String newSsid = extractQuoted("ssid");
-    String newPass = extractQuoted("pass");
-    if (newSsid.length() == 0) {
-      Serial.println(F("ERR SETWIFI missing ssid"));
-      return;
-    }
-    applyNewWifiCredentials(newSsid, newPass);
-    Serial.println(F("OK SETWIFI saved"));
-    return;
-  }
   if (commandUpper == F("ARM")) {
     motionArmed = true;
     pcaAllChannelsOff();
@@ -3080,14 +3223,9 @@ void handleUsbCommand(String command) {
     Serial.println(F("OK DISARMED"));
     return;
   }
-  if (commandUpper == F("PINGUNO")) {
-    Serial.print(F("DEBUG writing @PING to UnoSerial on TX pin "));
-    Serial.println(UNO_TX_PIN);
-    UnoSerial.print('@');
-    UnoSerial.println(F("PING"));
-    UnoSerial.flush();
-    Serial.println(F(">UNO>@PING"));
-    Serial.println(F("DEBUG @PING flushed"));
+  if (commandUpper == F("PINGESP2")) {
+    sendEsp2Command(F("PING"));
+    Serial.println(F("OK PINGESP2"));
     return;
   }
   if (commandUpper == F("STOP")) {
@@ -3442,6 +3580,202 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  // SERVO_TEST <slot1to5|channel0to6> <FORWARD|BACKWARD> [duration]
+  // duration examples: 10000, 10000MS, 10S, 10SEC
+  // Convenience alias for quick spinner checks from Serial Monitor.
+
+  if (commandUpper == F("SERVO_TEST") || commandUpper.startsWith(F("SERVO_TEST "))) {
+    const int firstSpace = command.indexOf(' ');
+    const int secondSpace = command.indexOf(' ', firstSpace + 1);
+    if (firstSpace < 0 || secondSpace < 0) {
+      Serial.println(F("ERR format: SERVO_TEST <slot1to5|channel0to6> <FORWARD|BACKWARD> [duration]"));
+      return;
+    }
+
+    const int thirdSpace = command.indexOf(' ', secondSpace + 1);
+
+    String targetToken = command.substring(firstSpace + 1, secondSpace);
+    String actionToken = (thirdSpace < 0)
+      ? command.substring(secondSpace + 1)
+      : command.substring(secondSpace + 1, thirdSpace);
+    targetToken.trim();
+    actionToken.trim();
+
+    unsigned long testDurationMs = SERVO_TEST_DEFAULT_MS;
+    if (thirdSpace >= 0) {
+      String durationToken = command.substring(thirdSpace + 1);
+      durationToken.trim();
+      if (!parseDurationMsToken(durationToken, testDurationMs)) {
+        Serial.print(F("ERR SERVO_TEST duration use "));
+        Serial.print(SERVO_TEST_MIN_MS);
+        Serial.print(F(".."));
+        Serial.print(SERVO_TEST_MAX_MS);
+        Serial.println(F(" ms (ex: 10000 or 10SEC)"));
+        return;
+      }
+    }
+
+    String actionUpper = actionToken;
+    actionUpper.toUpperCase();
+    int cmd = SERVO_STOP_CMD;
+    bool validAction = true;
+    if (actionUpper == F("FORWARD")) {
+      cmd = SPINNER_RUN_CMD;
+    } else if (actionUpper == F("BACKWARD")) {
+      cmd = SPINNER_WITHDRAW_CMD;
+    } else {
+      validAction = false;
+    }
+
+    if (!validAction) {
+      Serial.println(F("ERR SERVO_TEST action FORWARD|BACKWARD"));
+      return;
+    }
+
+    if (!motionArmed) {
+      motionArmed = true;
+      pcaAllChannelsOff();
+      Serial.println(F("OK ARMED (SERVO_TEST)"));
+    }
+
+    const int target = targetToken.toInt();
+    if (target >= 1 && target <= 5) {
+      const uint8_t slotIndex = static_cast<uint8_t>(target - 1);
+      spinStorageMotor(slotIndex, static_cast<uint8_t>(cmd));
+      Serial.print(F("OK SERVO_TEST slot="));
+      Serial.print(target);
+      Serial.print(F(" action="));
+      Serial.print(actionUpper);
+      Serial.print(F(" durationMs="));
+      Serial.println(testDurationMs);
+      delay(testDurationMs);
+      stopStorageMotor(slotIndex);
+      Serial.print(F("OK SERVO_TEST slot="));
+      Serial.print(target);
+      Serial.println(F(" STOP"));
+      return;
+    }
+
+    if (target >= 0 && target < SERVO_CHANNEL_COUNT) {
+      setServoAngle(static_cast<uint8_t>(target), static_cast<uint8_t>(cmd));
+      Serial.print(F("OK SERVO_TEST channel="));
+      Serial.print(target);
+      Serial.print(F(" action="));
+      Serial.print(actionUpper);
+      Serial.print(F(" durationMs="));
+      Serial.println(testDurationMs);
+      delay(testDurationMs);
+      setServoAngle(static_cast<uint8_t>(target), SERVO_STOP_CMD);
+      Serial.print(F("OK SERVO_TEST channel="));
+      Serial.print(target);
+      Serial.println(F(" STOP"));
+      return;
+    }
+
+    Serial.println(F("ERR SERVO_TEST target slot1..5 or channel0..6"));
+    return;
+  }
+
+  // ELEVATOR_TEST <FORWARD|BACKWARD> [duration]
+  if (commandUpper.startsWith(F("ELEVATOR_TEST "))) {
+    const int firstSpace = command.indexOf(' ');
+    const int secondSpace = command.indexOf(' ', firstSpace + 1);
+    String actionToken = (secondSpace < 0)
+      ? command.substring(firstSpace + 1)
+      : command.substring(firstSpace + 1, secondSpace);
+    actionToken.trim();
+
+    unsigned long testDurationMs = SERVO_TEST_DEFAULT_MS;
+    if (secondSpace >= 0) {
+      String durationToken = command.substring(secondSpace + 1);
+      durationToken.trim();
+      if (!parseDurationMsToken(durationToken, testDurationMs)) {
+        Serial.print(F("ERR ELEVATOR_TEST duration use "));
+        Serial.print(SERVO_TEST_MIN_MS);
+        Serial.print(F(".."));
+        Serial.print(SERVO_TEST_MAX_MS);
+        Serial.println(F(" ms (ex: 10000 or 10SEC)"));
+        return;
+      }
+    }
+
+    String actionUpper = actionToken;
+    actionUpper.toUpperCase();
+    int cmd = SERVO_STOP_CMD;
+    if (actionUpper == F("FORWARD")) {
+      cmd = SPINNER_RUN_CMD;
+    } else if (actionUpper == F("BACKWARD")) {
+      cmd = SPINNER_WITHDRAW_CMD;
+    } else {
+      Serial.println(F("ERR ELEVATOR_TEST action FORWARD|BACKWARD"));
+      return;
+    }
+    if (!motionArmed) {
+      motionArmed = true;
+      pcaAllChannelsOff();
+      Serial.println(F("OK ARMED (ELEVATOR_TEST)"));
+    }
+    setServoAngle(ELEVATOR_LIFT_CHANNEL, static_cast<uint8_t>(cmd));
+    Serial.print(F("OK ELEVATOR_TEST action="));
+    Serial.print(actionUpper);
+    Serial.print(F(" durationMs="));
+    Serial.println(testDurationMs);
+    delay(testDurationMs);
+    setServoAngle(ELEVATOR_LIFT_CHANNEL, SERVO_STOP_CMD);
+    Serial.println(F("OK ELEVATOR_TEST STOP"));
+    return;
+  }
+
+  // OUTPUT_TEST <FORWARD|BACKWARD> [duration]
+  if (commandUpper.startsWith(F("OUTPUT_TEST "))) {
+    const int firstSpace = command.indexOf(' ');
+    const int secondSpace = command.indexOf(' ', firstSpace + 1);
+    String actionToken = (secondSpace < 0)
+      ? command.substring(firstSpace + 1)
+      : command.substring(firstSpace + 1, secondSpace);
+    actionToken.trim();
+
+    unsigned long testDurationMs = SERVO_TEST_DEFAULT_MS;
+    if (secondSpace >= 0) {
+      String durationToken = command.substring(secondSpace + 1);
+      durationToken.trim();
+      if (!parseDurationMsToken(durationToken, testDurationMs)) {
+        Serial.print(F("ERR OUTPUT_TEST duration use "));
+        Serial.print(SERVO_TEST_MIN_MS);
+        Serial.print(F(".."));
+        Serial.print(SERVO_TEST_MAX_MS);
+        Serial.println(F(" ms (ex: 10000 or 10SEC)"));
+        return;
+      }
+    }
+
+    String actionUpper = actionToken;
+    actionUpper.toUpperCase();
+    int cmd = SERVO_STOP_CMD;
+    if (actionUpper == F("FORWARD")) {
+      cmd = SPINNER_RUN_CMD;
+    } else if (actionUpper == F("BACKWARD")) {
+      cmd = SPINNER_WITHDRAW_CMD;
+    } else {
+      Serial.println(F("ERR OUTPUT_TEST action FORWARD|BACKWARD"));
+      return;
+    }
+    if (!motionArmed) {
+      motionArmed = true;
+      pcaAllChannelsOff();
+      Serial.println(F("OK ARMED (OUTPUT_TEST)"));
+    }
+    setServoAngle(ELEVATOR_OUT_CHANNEL, static_cast<uint8_t>(cmd));
+    Serial.print(F("OK OUTPUT_TEST action="));
+    Serial.print(actionUpper);
+    Serial.print(F(" durationMs="));
+    Serial.println(testDurationMs);
+    delay(testDurationMs);
+    setServoAngle(ELEVATOR_OUT_CHANNEL, SERVO_STOP_CMD);
+    Serial.println(F("OK OUTPUT_TEST STOP"));
+    return;
+  }
+
   if (commandUpper == F("STORAGECONF")) {
     printStorageConfig();
     return;
@@ -3600,6 +3934,49 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  if (commandUpper.startsWith(F("FLOORTEST "))) {
+    if (!SERVOS_ENABLED) {
+      Serial.println(F("ERR servos-disabled"));
+      return;
+    }
+    if (!motionArmed) {
+      motionArmed = true;
+      pcaAllChannelsOff();
+      Serial.println(F("OK ARMED (FLOORTEST)"));
+    }
+    if (billRoute.active) {
+      Serial.println(F("ERR lift busy (bill route active)"));
+      return;
+    }
+
+    String arg = command.substring(10);
+    arg.trim();
+    String argUpper = arg;
+    argUpper.toUpperCase();
+
+    if (argUpper == F("ALL")) {
+      for (uint8_t slot = 0; slot < 5; ++slot) {
+        if (!moveLiftDirectToSlotInstantStop(slot)) {
+          Serial.print(F("ERR FLOORTEST ALL failed at IR5-"));
+          Serial.println(slot + 1);
+          return;
+        }
+        delay(250);
+      }
+      Serial.println(F("OK FLOORTEST ALL"));
+      return;
+    }
+
+    const int slot = arg.toInt();
+    if (slot < 1 || slot > 5) {
+      Serial.println(F("ERR FLOORTEST slot 1..5 or ALL"));
+      return;
+    }
+
+    moveLiftDirectToSlotInstantStop(static_cast<uint8_t>(slot - 1));
+    return;
+  }
+
   if (commandUpper == F("LIFTTEST")) {
     if (!motionArmed) {
       motionArmed = true;
@@ -3610,7 +3987,7 @@ void handleUsbCommand(String command) {
     return;
   }
 
-  if (commandUpper.startsWith(F("SERVO "))) {
+  if (commandUpper.startsWith(F("MOTOR ")) || commandUpper.startsWith(F("SERVO "))) {
     if (!SERVOS_ENABLED) {
       Serial.println(F("ERR servos-disabled"));
       return;
@@ -3628,10 +4005,43 @@ void handleUsbCommand(String command) {
     } else {
       setServoAngle(channel, angle);
     }
-    Serial.print(F("OK SERVO channel="));
+    Serial.print(F("OK MOTOR channel="));
     Serial.print(channel);
-    Serial.print(F(" angle="));
+    Serial.print(F(" cmd="));
     Serial.println(angle);
+    return;
+  }
+
+  if (commandUpper.startsWith(F("PWMUS "))) {
+    if (!SERVOS_ENABLED) {
+      Serial.println(F("ERR servos-disabled"));
+      return;
+    }
+    if (!motionArmed) {
+      Serial.println(F("ERR motion-disarmed"));
+      return;
+    }
+    const int firstSpace = command.indexOf(' ');
+    const int secondSpace = command.indexOf(' ', firstSpace + 1);
+    if (secondSpace < 0) {
+      Serial.println(F("ERR format"));
+      return;
+    }
+    const int channelValue = command.substring(firstSpace + 1, secondSpace).toInt();
+    const int pulseUs = command.substring(secondSpace + 1).toInt();
+    if (channelValue < 0 || channelValue >= SERVO_CHANNEL_COUNT) {
+      Serial.println(F("ERR channel 0..6"));
+      return;
+    }
+    if (pulseUs < 500 || pulseUs > 2500) {
+      Serial.println(F("ERR us 500..2500"));
+      return;
+    }
+    pcaSetPwm(static_cast<uint8_t>(channelValue), 0, pcaOffCountFromPulseUs(pulseUs));
+    Serial.print(F("OK PWMUS channel="));
+    Serial.print(channelValue);
+    Serial.print(F(" us="));
+    Serial.println(pulseUs);
     return;
   }
 
@@ -3650,7 +4060,7 @@ void handleUsbCommand(String command) {
 
   // DEPOSIT [amount] is a no-op on the ESP. Real deposits come from the bill
   // acceptor (GPIO32) which calls postDeposit() directly. Accept the command
-  // silently so stray cloud-queued DEPOSIT messages don't trigger ERR loops
+  // silently so stray queued DEPOSIT messages don't trigger ERR loops
   // (which previously crashed the panic handler and rebooted the device).
   if (commandUpper.startsWith(F("DEPOSIT"))) {
     Serial.println(F("OK DEPOSIT (no-op; insert bill into acceptor)"));
@@ -3686,6 +4096,10 @@ void handleUsbCommand(String command) {
   // shorted to GND or held by a dead device. If both read HIGH but I2CSCAN
   // still finds nothing -> the chip is unpowered (VCC=0V) or fried.
   if (commandUpper.equals(F("I2CDIAG"))) {
+    if (!USE_PCA9685) {
+      Serial.println(F("I2CDIAG skipped (direct-servo mode)"));
+      return;
+    }
     Wire.end();
     delay(20);
     const uint8_t SDA_PIN = 21;
@@ -3726,6 +4140,10 @@ void handleUsbCommand(String command) {
   // Use this to confirm the ESP32 can actually reach the PCA9685 (expected at 0x40).
   // If 0x40 is missing -> SDA/SCL wiring, missing pullups, or dead PCA9685.
   if (commandUpper.equals(F("I2CSCAN"))) {
+    if (!USE_PCA9685) {
+      Serial.println(F("I2CSCAN skipped (direct-servo mode)"));
+      return;
+    }
     auto runScan = [](const __FlashStringHelper* label, uint8_t sda, uint8_t scl, bool pullups) -> uint8_t {
       Serial.print(F("I2CSCAN ")); Serial.print(label);
       Serial.print(F(" SDA=")); Serial.print(sda);
@@ -3773,6 +4191,56 @@ void handleUsbCommand(String command) {
     return;
   }
 
+  if (commandUpper.startsWith(F("PCAREGS"))) {
+    if (!USE_PCA9685) {
+      Serial.println(F("PCAREGS skipped (direct-servo mode)"));
+      return;
+    }
+    if (!pcaIsPresent()) {
+      Serial.println(F("ERR pca-offline"));
+      return;
+    }
+
+    const uint8_t mode1 = pcaReadRegister(PCA9685_MODE1);
+    const uint8_t mode2 = pcaReadRegister(PCA9685_MODE2);
+    const uint8_t prescale = pcaReadRegister(PCA9685_PRESCALE);
+
+    Serial.print(F("PCA MODE1=0x"));
+    if (mode1 < 16) Serial.print('0');
+    Serial.print(mode1, HEX);
+    Serial.print(F(" MODE2=0x"));
+    if (mode2 < 16) Serial.print('0');
+    Serial.print(mode2, HEX);
+    Serial.print(F(" PRE=0x"));
+    if (prescale < 16) Serial.print('0');
+    Serial.println(prescale, HEX);
+
+    int channel = -1;
+    const int firstSpace = command.indexOf(' ');
+    if (firstSpace > 0) {
+      channel = command.substring(firstSpace + 1).toInt();
+    }
+    if (channel < 0 || channel >= SERVO_CHANNEL_COUNT) {
+      channel = 0;
+    }
+
+    const uint8_t base = PCA9685_LED0_ON_L + static_cast<uint8_t>(4 * channel);
+    const uint16_t onCount =
+      static_cast<uint16_t>(pcaReadRegister(base + 0)) |
+      (static_cast<uint16_t>(pcaReadRegister(base + 1) & 0x0F) << 8);
+    const uint16_t offCount =
+      static_cast<uint16_t>(pcaReadRegister(base + 2)) |
+      (static_cast<uint16_t>(pcaReadRegister(base + 3) & 0x0F) << 8);
+
+    Serial.print(F("PCA CH="));
+    Serial.print(channel);
+    Serial.print(F(" ON="));
+    Serial.print(onCount);
+    Serial.print(F(" OFF="));
+    Serial.println(offCount);
+    return;
+  }
+
   Serial.println(F("ERR unknown"));
 }
 
@@ -3793,58 +4261,118 @@ void readUsbCommands() {
   }
 }
 
-void handleUnoLine(const String& line) {
+void handleEsp2Line(const String& line) {
   if (line.length() == 0) {
     return;
   }
-  Serial.print(F("UNO> "));
-  Serial.println(line);
 
-  if (line == F("PONG")) {
-    unoOnline = true;
+  esp2Online = true;
+
+  if (line.startsWith("OK DISPENSE")) {
+    Serial.print(F("ESP2 ACK: "));
+    Serial.println(line);
     return;
   }
-  if (line.startsWith(F("STATUS "))) {
-    unoOnline = true;
+
+  if (line.startsWith("DONE")) {
+    int motor = 0;
+    int count = 0;
+    float amount = 0.0f;
+    const int motorStart = line.indexOf("motor=");
+    const int countStart = line.indexOf("count=");
+    const int amountStart = line.indexOf("amount=");
+
+    if (motorStart >= 0) {
+      motor = line.substring(motorStart + 6).toInt();
+    }
+    if (countStart >= 0) {
+      count = line.substring(countStart + 6).toInt();
+    }
+    if (amountStart >= 0) {
+      amount = line.substring(amountStart + 7).toFloat();
+    }
+
+    Serial.print(F("Received DONE message: motor="));
+    Serial.print(motor);
+    Serial.print(F(", count="));
+    Serial.print(count);
+    Serial.print(F(", amount="));
+    Serial.println(amount);
+
+    // Mark the current ESP2 task as completed so watchdog won't timeout.
+    if (remoteTaskActive) {
+      remoteTaskActive = false;
+      remoteTaskSentMs = 0;
+      if (taskCount > 0 && taskQueue[0].motor == remoteTaskMotor) {
+        popQueueFront();
+      }
+    }
+
+    postWithdrawCompleteIfAllDispenseIdle();
     return;
   }
-  if (line.startsWith(F("OK DISPENSE"))) {
-    unoOnline = true;
-    return;
-  }
-  if (line.startsWith(F("DONE motor="))) {
-    unoOnline = true;
-    remoteTaskActive = false;
-    remoteTaskSentMs = 0;
-    if (taskCount > 0 && taskQueue[0].motor >= 1 && taskQueue[0].motor <= 3) {
-      popQueueFront();
+
+  if (line.startsWith("ERR")) {
+    Serial.print(F("ESP2 ERR: "));
+    Serial.println(line);
+    if (remoteTaskActive) {
+      remoteTaskActive = false;
+      remoteTaskSentMs = 0;
+      if (taskCount > 0 && taskQueue[0].motor == remoteTaskMotor) {
+        popQueueFront();
+      }
     }
     return;
-  }
-  if (line.startsWith(F("ERR motor=")) || line == F("OK STOP")) {
-    unoOnline = true;
-    remoteTaskActive = false;
-    remoteTaskSentMs = 0;
-    if (taskCount > 0 && taskQueue[0].motor >= 1 && taskQueue[0].motor <= 3) {
-      popQueueFront();
-    }
+  } else {
+    Serial.print(F("Unknown message from ESP2: "));
+    Serial.println(line);
   }
 }
 
-void readUnoLines() {
-  while (UnoSerial.available() > 0) {
-    const char incoming = static_cast<char>(UnoSerial.read());
+void readEsp2Lines() {
+  while (RaspiSerial.available() > 0) {
+    const char incoming = static_cast<char>(RaspiSerial.read());
     if (incoming == '\r') {
       continue;
     }
     if (incoming == '\n') {
-      handleUnoLine(unoLineBuffer);
-      unoLineBuffer = "";
+      handleEsp2Line(esp2LineBuffer);
+      esp2LineBuffer = "";
       continue;
     }
-    if (unoLineBuffer.length() < 128) {
-      unoLineBuffer += incoming;
+
+    // Keep only readable ASCII to prevent gibberish logs from UART noise.
+    if (incoming < 32 || incoming > 126) {
+      continue;
     }
+
+    if (esp2LineBuffer.length() < 128) {
+      esp2LineBuffer += incoming;
+    }
+  }
+}
+
+void connectWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+
+  Serial.print(F("WIFI connecting ssid="));
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  const unsigned long startedMs = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startedMs) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("WIFI connected ip="));
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println(F("WIFI not connected (continuing offline mode)"));
   }
 }
 
@@ -3852,13 +4380,15 @@ void readUnoLines() {
 
 void setup() {
   Serial.begin(USB_SERIAL_BAUD);
-  UnoSerial.begin(UNO_SERIAL_BAUD, SERIAL_8N1, UNO_RX_PIN, UNO_TX_PIN);
+  RaspiSerial.begin(RASPI_UART_BAUD, SERIAL_8N1, RASPI_UART_RX_PIN, RASPI_UART_TX_PIN);
+  connectWifi();
 
   pinMode(M4_IN1_PIN, OUTPUT);
   pinMode(M4_IN2_PIN, OUTPUT);
   pinMode(M4_IN3_PIN, OUTPUT);
   pinMode(M4_IN4_PIN, OUTPUT);
   pinMode(M4_IR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(M4_IR_PIN), onM4IrPinChange, CHANGE);
   pinMode(BILL_PIN, INPUT_PULLUP);
   pinMode(COIN_PIN, INPUT_PULLUP);
   if (LOCAL_COIN_SERVO_MODE) {
@@ -3870,11 +4400,19 @@ void setup() {
   }
   // Bill pin uses a hardware interrupt so pulses are not missed when loop()
   // is busy with HTTP, motor delays, etc.
+  coinIsrLastLevel = (digitalRead(COIN_PIN) == HIGH);
+  attachInterrupt(digitalPinToInterrupt(COIN_PIN), onCoinPinChange, CHANGE);
   billIsrLastLevel = (digitalRead(BILL_PIN) == HIGH);
   attachInterrupt(digitalPinToInterrupt(BILL_PIN), onBillPinChange, CHANGE);
   if (IR5_SENSORS_ENABLED) {
     for (uint8_t index = 0; index < 5; ++index) {
-      pinMode(IR5_PINS[index], INPUT_PULLUP);
+      const uint8_t irPin = IR5_PINS[index];
+      // GPIO34/35 are input-only and do not support internal pull-ups.
+      if (irPin == 34 || irPin == 35 || irPin == 36 || irPin == 39) {
+        pinMode(irPin, INPUT);
+      } else {
+        pinMode(irPin, INPUT_PULLUP);
+      }
       const bool initial = isIr5RawDetected(index);
       ir5RawLastState[index] = initial;
       ir5StableState[index] = initial;
@@ -3892,11 +4430,17 @@ void setup() {
 
   releaseMotor4();
 
-  // PCA9685 removed; do not call Wire.begin(21,22) -- those pins are now servo
-  // PWM outputs (CH4 and CH5). pcaIsPresent() always returns true now.
+  if (USE_PCA9685) {
+    // PCA9685 on I2C (SDA=21, SCL=22).
+    Wire.begin(21, 22);
+  }
   const bool pcaOnlineAtBoot = pcaIsPresent();
   if (pcaOnlineAtBoot) {
-    Serial.println(F("PCA9685 detected at 0x40"));
+    if (USE_PCA9685) {
+      Serial.println(F("PCA9685 detected at 0x40"));
+    } else {
+      Serial.println(F("DIRECT SERVO MODE (ESP32 GPIO PWM)"));
+    }
     pcaInit50Hz();
     if (SERVOS_ENABLED && motionArmed) {
       homeServos();
@@ -3911,7 +4455,7 @@ void setup() {
   billInput.lastLevel = (digitalRead(BILL_PIN) == HIGH);
   lastStatusPrintMs = millis();
 
-  Serial.println(F("ESP32 CASH ATM CONTROLLER READY"));
+  Serial.println(F("ESP1 - CASH ATM CONTROLLER READY"));
   if (!STEPPERS_ENABLED) {
     Serial.println(F("SAFE MODE: all stepper motors disabled"));
   }
@@ -3958,20 +4502,16 @@ void setup() {
     }
   }
 
-  // Initiate Wi-Fi connection on boot. ensureWifi() handles primary +
-  // fallback (CASHWIFI/CASH12345!) automatically; loop() will keep retrying
-  // every 5 s if the first attempt times out.
-  loadWifiCredentials();
-  ensureWifi();
+  Serial.println(F("INFO: local-control mode"));
 
-  UnoSerial.print('@');
-  UnoSerial.println(F("PING"));
-  Serial.println(F(">UNO>@PING"));
+  sendEsp2Command(F("PING"));
 }
 
 void loop() {
   readUsbCommands();
-  readUnoLines();
+  readEsp2Lines();
+  // Pulse inputs run FIRST so short coin/bill pulses are never starved by
+  // the blocking HTTP call inside serviceCloudCommandPoll().
   serviceInputDiag();
 
   if (ACCEPTORS_CONNECTED && COIN_INPUT_ENABLED) {
@@ -3980,6 +4520,8 @@ void loop() {
   if (ACCEPTORS_CONNECTED && BILL_INPUT_ENABLED) {
     servicePulseInput(billInput, BILL_MAP, sizeof(BILL_MAP) / sizeof(BILL_MAP[0]));
   }
+  // Cloud poll runs AFTER pulse detection so HTTP blocking doesn't miss pulses.
+  serviceCloudCommandPoll();
   serviceIr5Sensors();
   if (ACCEPTORS_CONNECTED && AUTO_BILL_ROUTE_ENABLED) {
     startBillRouteIfPending();
@@ -3990,11 +4532,12 @@ void loop() {
   serviceLiftHardLimits();
   serviceLocalCoinServoJob();
   serviceLocalMotor4();
-  // Uno watchdog: if a DISPENSE was sent and no DONE/ERR came back within
+  // ESP2 watchdog: if a DISPENSE was sent and no DONE/ERR came back within
   // DISPENSE_TIMEOUT_MS, log + clear so subsequent tasks can be sent.
-  if (!LOCAL_COIN_SERVO_MODE && remoteTaskActive && remoteTaskSentMs > 0 &&
+    if (!LOCAL_COIN_SERVO_MODE && DISPENSE_TIMEOUT_MS > 0 &&
+      remoteTaskActive && remoteTaskSentMs > 0 &&
       millis() - remoteTaskSentMs > DISPENSE_TIMEOUT_MS) {
-    Serial.print(F("WARN uno timeout motor="));
+    Serial.print(F("WARN esp2 timeout motor="));
     Serial.print(remoteTaskMotor);
     Serial.print(F(" count="));
     Serial.print(remoteTaskCount);
@@ -4009,21 +4552,16 @@ void loop() {
   startNextQueuedTask();
   servicePendingWithdraw();
   serviceWithdrawJob();
-  pollRemoteCommands();
 
   const unsigned long nowMs = millis();
   if (LOOP_HEARTBEAT_VERBOSE && (nowMs - lastLoopHeartbeatMs >= LOOP_HEARTBEAT_MS)) {
     lastLoopHeartbeatMs = nowMs;
-    Serial.print(F("ALIVE wifi="));
-    Serial.print(WiFi.status());
-    Serial.print(F(" ip="));
-    Serial.print(WiFi.localIP());
+    Serial.print(F("ALIVE net=off"));
     Serial.print(F(" q="));
     Serial.print(taskCount);
     Serial.print(F(" withdraw="));
     Serial.print(withdrawJob.active ? F("1") : F("0"));
-    Serial.print(F(" pollFail="));
-    Serial.println(commandPollFailures);
+    Serial.println();
   }
   if (STATUS_VERBOSE_LOG && (nowMs - lastStatusPrintMs >= STATUS_PRINT_MS)) {
     lastStatusPrintMs = nowMs;

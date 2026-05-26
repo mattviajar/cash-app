@@ -26,7 +26,32 @@ const defaultStatus: DeviceStatus = {
 
 let currentStatus: DeviceStatus = defaultStatus
 
-export async function GET() {
+export async function GET(request: Request) {
+  // Backward compatibility: allow simple query-driven updates from firmware
+  // clients that send GET /api/device/status?status=complete.
+  // Normal dashboard polling calls this endpoint without query params.
+  try {
+    const url = new URL(request.url)
+    const status = url.searchParams.get('status')
+    if (status === 'idle' || status === 'dispensing' || status === 'complete') {
+      const amountRaw = Number(url.searchParams.get('amount') ?? currentStatus.withdrawAmount)
+      const nowIso = new Date().toISOString()
+      currentStatus = {
+        ...currentStatus,
+        updatedAt: nowIso,
+        withdrawState: status,
+        withdrawActive: status === 'dispensing',
+        withdrawAmount: Number.isFinite(amountRaw)
+          ? Math.max(0, Math.round(amountRaw * 100) / 100)
+          : currentStatus.withdrawAmount,
+        lastWithdrawCompletedAt:
+          status === 'complete' ? nowIso : currentStatus.lastWithdrawCompletedAt,
+      }
+    }
+  } catch {
+    // Ignore compatibility parsing failures and just return current status.
+  }
+
   return NextResponse.json(currentStatus, {
     headers: {
       'Cache-Control': 'no-store, max-age=0',

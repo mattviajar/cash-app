@@ -127,6 +127,8 @@ export async function GET(request: Request) {
   const consume = searchParams.get('consume') === 'true'
   const sinceRaw = Number(searchParams.get('since') ?? '0')
   const sinceId = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0
+  const eventSinceRaw = Number(searchParams.get('eventSince') ?? '0')
+  const eventSinceId = Number.isFinite(eventSinceRaw) && eventSinceRaw > 0 ? Math.floor(eventSinceRaw) : 0
 
   try {
     if (consume) {
@@ -139,7 +141,20 @@ export async function GET(request: Request) {
       where: { id: { gt: sinceId } },
       orderBy: { id: 'asc' },
     })
-    return NextResponse.json({ deposits })
+    const events = await prisma.machineCashEvent.findMany({
+      where: {
+        direction: 'IN',
+        id: { gt: eventSinceId },
+      },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        amount: true,
+        source: true,
+        createdAt: true,
+      },
+    })
+    return NextResponse.json({ deposits, events })
   } catch (e) {
     const detail = JSON.stringify(e, Object.getOwnPropertyNames(e as object))
     return NextResponse.json({ error: 'DB error', detail }, { status: 500 })

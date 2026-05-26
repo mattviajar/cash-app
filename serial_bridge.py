@@ -1,15 +1,14 @@
-﻿"""Dual-port USB bridge: PC sits between Arduino Uno and ESP32.
+﻿"""Dual-port USB bridge: Pi sits between ESP1 and ESP2.
 
 Architecture:
-    Cloud /api/command   --HTTP-->   PC --USB--> ESP32   (handles bills via PCA9685
-                                                          servos, parses WITHDRAW)
-    ESP32 prints `>UNO>@<cmd>` on USB --PC intercepts--> Uno USB  (coin steppers)
-    Uno status replies   --USB-->    PC --USB--> ESP32   (so ESP can track jobs)
-    ESP32 events (e.g. `DEPOSIT:20` from bill acceptor) --PC--> /api/deposit
-    Uno DEPOSIT events (if bill acceptor wired to Uno)  --PC--> /api/deposit
+    Cloud /api/command   --HTTP-->   Pi --USB--> ESP1   (withdraw logic + bills)
+    ESP1 prints `>ESP2>@<cmd>` on USB --Pi intercepts--> ESP2 USB  (coin motors 1..3)
+    ESP2 status replies   --USB-->    Pi --USB--> ESP1   (so ESP1 can track jobs)
+    ESP1 events (e.g. `DEPOSIT:20` from bill acceptor) --Pi--> /api/deposit
+    ESP2 deposit events   --USB-->    Pi --HTTP--> /api/deposit (if any are emitted)
 
 Override ports with env vars:
-    CASH_UNO_PORT   (default COM4)
+    CASH_ESP2_PORT  (default COM4)
     CASH_ESP_PORT   (default COM7)
     CASH_BAUD       (default 115200)
 """
@@ -23,36 +22,35 @@ import requests
 import serial
 from serial.tools import list_ports
 
-UNO_PORT = os.getenv("CASH_UNO_PORT", "COM4")
+ESP2_PORT = os.getenv("CASH_ESP2_PORT", os.getenv("CASH_UNO_PORT", "COM4"))
 ESP_PORT = os.getenv("CASH_ESP_PORT", "COM7")
 BAUD_RATE = int(os.getenv("CASH_BAUD", "115200"))
 
 DEPOSIT_API = "https://cashmv.up.railway.app/api/deposit"
 COMMAND_API = "https://cashmv.up.railway.app/api/command"
+DEVICE_STATUS_API = "https://cashmv.up.railway.app/api/device/status"
 COMMAND_POLL_INTERVAL = 0.5  # seconds between cloud command polls
 
-# Canonical deposit tag emitted by ESP32 (and optionally the Uno).
+# Canonical deposit tag emitted by ESP controllers.
 AMOUNT_FROM_TAG = re.compile(r"DEPOSIT\s*:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+WITHDRAW_AMOUNT_FROM_TAG = re.compile(r"amount\s*=\s*(\d+)", re.IGNORECASE)
 
-# ESP32 prints lines like ">UNO>@DISPENSE 2 1" whenever it would otherwise
-# send to UnoSerial. The bridge strips the prefix and writes to the Uno port.
-ESP_TO_UNO_PREFIX = ">UNO>@"
+# ESP1 prints lines like ">ESP2>@DISPENSE 2 1" for ESP2-bound commands.
+ESP_TO_ESP2_PREFIX = ">ESP2>@"
 
-# Uno reply lines we should mirror back to the ESP32 so its state machine
-# sees them (it normally reads these from SoftwareSerial). Forward EVERY
-# non-empty Uno line by default; only drop lines matching the noise list.
-# This makes the PC USB hop a complete substitute for the broken ESP↔Uno
-# RX/TX wire — the ESP firmware's handleUnoLine() safely ignores unknowns.
-UNO_NOISE_PREFIXES = (
+# ESP2 reply lines we should mirror back to ESP1 so its state machine sees
+# them. Forward every non-empty line by default; only drop noise lines.
+# This makes the Pi USB hop a complete inter-device relay between ESP1 and ESP2.
+ESP2_NOISE_PREFIXES = (
     # PHASE prints fire many times per second during a dispense — skip the
     # spam, the ESP doesn't act on them anyway.
     "PHASE motor=",
 )
 
-# Some Uno responses to USB-originated commands carry a USB_/_USB tag that
+# Some ESP2 responses to USB-originated commands carry a USB_/_USB tag that
 # the ESP's parser does not recognize. Rewrite them to the canonical form
-# before relaying so handleUnoLine() matches the existing branches.
-UNO_USB_TO_ESP_REWRITES = (
+# before relaying so ESP1's parser matches the existing branches.
+ESP2_USB_TO_ESP1_REWRITES = (
     ("PONG_USB", "PONG"),
     ("USB_STATUS ", "STATUS "),
     ("USB OK STOP", "OK STOP"),
@@ -60,8 +58,8 @@ UNO_USB_TO_ESP_REWRITES = (
 )
 
 
-def normalize_uno_line_for_esp(line: str) -> str:
-    for src, dst in UNO_USB_TO_ESP_REWRITES:
+def normalize_esp2_line_for_esp1(line: str) -> str:
+    for src, dst in ESP2_USB_TO_ESP1_REWRITES:
         if line.startswith(src):
             return dst + line[len(src):]
     return line
@@ -87,6 +85,48 @@ def post_deposit(amount: float, source: str):
         print(f"[POST] amount={amount} src={source} status={r.status_code} body={r.text}")
     except Exception as e:
         print(f"[POST-ERROR] amount={amount} src={source} error={e}")
+
+
+def post_withdraw_status(state: str, amount: int, active: bool):
+    try:
+        r = requests.post(
+            DEVICE_STATUS_API,
+            json={
+                "withdrawActive": active,
+                "withdrawState": state,
+                "withdrawAmount": amount,
+            },
+            timeout=5,
+        )
+        print(
+            f"[POST-STATUS] state={state} active={int(active)} amount={amount} "
+            f"status={r.status_code} body={r.text}"
+        )
+    except Exception as e:
+        print(f"[POST-STATUS-ERROR] state={state} amount={amount} error={e}")
+
+
+def maybe_post_withdraw_status(line: str):
+    upper = line.upper()
+
+    if upper.startswith("WITHDRAW START"):
+        amount = 0
+        m = WITHDRAW_AMOUNT_FROM_TAG.search(line)
+        if m:
+            try:
+                amount = int(m.group(1))
+            except ValueError:
+                amount = 0
+        post_withdraw_status("dispensing", amount, True)
+        return
+
+    if upper.startswith("WITHDRAW DONE"):
+        post_withdraw_status("complete", 0, False)
+        return
+
+    if upper.startswith("WITHDRAW ERR") or upper.startswith("ERR WITHDRAW"):
+        post_withdraw_status("error", 0, False)
+        return
 
 
 def available_ports():
@@ -115,8 +155,8 @@ def safe_write(ser: serial.Serial, label: str, data: str):
         print(f"[SERIAL-ERROR] write to {label} failed: {e}")
 
 
-def esp_reader(esp: serial.Serial, uno: serial.Serial, stop_event: threading.Event):
-    """Read ESP32 USB lines: forward `>UNO>@...` to Uno, POST DEPOSIT tags."""
+def esp_reader(esp: serial.Serial, esp2: serial.Serial, stop_event: threading.Event):
+    """Read ESP1 USB lines: forward `>ESP2>@...` to ESP2, POST DEPOSIT tags."""
     buf = bytearray()
     while not stop_event.is_set():
         try:
@@ -139,25 +179,27 @@ def esp_reader(esp: serial.Serial, uno: serial.Serial, stop_event: threading.Eve
                 continue
             print(f"[ESP] {line}")
 
-            if line.startswith(ESP_TO_UNO_PREFIX):
-                relayed = line[len(ESP_TO_UNO_PREFIX):]
-                print(f"[ESP->UNO] {relayed}")
-                safe_write(uno, "UNO", relayed + "\n")
+            if line.startswith(ESP_TO_ESP2_PREFIX):
+                relayed = line[len(ESP_TO_ESP2_PREFIX):]
+                print(f"[ESP->ESP2] {relayed}")
+                safe_write(esp2, "ESP2", relayed + "\n")
                 continue
 
             amount = extract_amount(line)
             if amount is not None and amount > 0:
                 post_deposit(amount, "bill")
 
+            maybe_post_withdraw_status(line)
 
-def uno_reader(uno: serial.Serial, esp: serial.Serial, stop_event: threading.Event):
-    """Read Uno USB lines: mirror reply lines to ESP, POST DEPOSIT tags."""
+
+def esp2_reader(esp2: serial.Serial, esp: serial.Serial, stop_event: threading.Event):
+    """Read ESP2 USB lines: mirror reply lines to ESP1, POST DEPOSIT tags."""
     buf = bytearray()
     while not stop_event.is_set():
         try:
-            chunk = uno.read(256)
+            chunk = esp2.read(256)
         except serial.SerialException as e:
-            print(f"[SERIAL-ERROR] UNO read failed: {e}")
+            print(f"[SERIAL-ERROR] ESP2 read failed: {e}")
             stop_event.set()
             return
         if not chunk:
@@ -172,19 +214,19 @@ def uno_reader(uno: serial.Serial, esp: serial.Serial, stop_event: threading.Eve
             line = raw.decode(errors="ignore").strip()
             if not line:
                 continue
-            print(f"[UNO] {line}")
+            print(f"[ESP2] {line}")
 
-            # Forward every non-empty Uno line back to the ESP via USB so it
+            # Forward every non-empty ESP2 line back to ESP1 via USB so it
             # substitutes the broken SoftwareSerial wire. Drop only lines
             # that match the noise blocklist.
-            if not any(line.startswith(p) for p in UNO_NOISE_PREFIXES):
-                relay = normalize_uno_line_for_esp(line)
-                print(f"[UNO->ESP] {relay}")
-                safe_write(esp, "ESP", "<UNO<" + relay + "\n")
+            if not any(line.startswith(p) for p in ESP2_NOISE_PREFIXES):
+                relay = normalize_esp2_line_for_esp1(line)
+                print(f"[ESP2->ESP1] {relay}")
+                safe_write(esp, "ESP", "<ESP2<" + relay + "\n")
 
             amount = extract_amount(line)
             if amount is not None and amount > 0:
-                post_deposit(amount, "bill")
+                post_deposit(amount, "coin")
 
 
 def command_poll_loop(esp: serial.Serial, stop_event: threading.Event):
@@ -212,13 +254,13 @@ def command_poll_loop(esp: serial.Serial, stop_event: threading.Event):
 
 
 def run_once():
-    uno = open_serial(UNO_PORT, "UNO")
+    esp2 = open_serial(ESP2_PORT, "ESP2")
     esp = open_serial(ESP_PORT, "ESP")
     stop_event = threading.Event()
 
     threads = [
-        threading.Thread(target=esp_reader, args=(esp, uno, stop_event), daemon=True),
-        threading.Thread(target=uno_reader, args=(uno, esp, stop_event), daemon=True),
+        threading.Thread(target=esp_reader, args=(esp, esp2, stop_event), daemon=True),
+        threading.Thread(target=esp2_reader, args=(esp2, esp, stop_event), daemon=True),
         threading.Thread(target=command_poll_loop, args=(esp, stop_event), daemon=True),
     ]
     for t in threads:
@@ -233,7 +275,7 @@ def run_once():
         raise
     finally:
         stop_event.set()
-        for s in (uno, esp):
+        for s in (esp2, esp):
             try:
                 s.close()
             except Exception:
@@ -241,7 +283,7 @@ def run_once():
 
 
 def run():
-    print(f"[INFO] Bridge starting. UNO={UNO_PORT}  ESP={ESP_PORT}  BAUD={BAUD_RATE}")
+    print(f"[INFO] Bridge starting. ESP2={ESP2_PORT}  ESP1={ESP_PORT}  BAUD={BAUD_RATE}")
     while True:
         try:
             run_once()

@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
 
 type Role = 'kid' | 'parent'
-type MenuKey = 'dashboard' | 'goals' | 'transactions' | 'statistics' | 'settings' | 'profile'
+type MenuKey = 'dashboard' | 'transactions' | 'settings' | 'profile'
+type KidQuickSection = 'none' | 'withdraw' | 'activity'
+type ParentQuickSection = 'none' | 'deposit' | 'withdraw' | 'activity'
 type HistoryKind = 'withdrawal' | 'hardware'
 
 type WithdrawalRecord = {
@@ -43,13 +44,62 @@ type Goal = {
   target: number
 }
 
+type MachineInventory = {
+  bill20: number
+  bill50: number
+  bill100: number
+  bill500: number
+  bill1000: number
+  coin1: number
+  coin5: number
+  coin10: number
+  coin20: number
+}
+
+type InventoryResponse = {
+  inventory?: MachineInventory
+  totalValue?: number
+}
+
+type DeviceLockStatus = {
+  active: boolean
+  holder: string | null
+  mode: string | null
+  expiresAt: string | null
+}
+
+type DepositDebugState = {
+  kidSince: number
+  parentSince: number
+  kidEventSince: number
+  parentEventSince: number
+  lastBatchCount: number
+  lastBatchMaxId: number
+  lastEventBatchCount: number
+  lastEventMaxId: number
+  lastBatchAmount: number
+  lastPollAt: string
+}
+
+const withdrawDenominations = [
+  { field: 'bill1000', label: '1000 bill', value: 1000 },
+  { field: 'bill500', label: '500 bill', value: 500 },
+  { field: 'bill100', label: '100 bill', value: 100 },
+  { field: 'bill50', label: '50 bill', value: 50 },
+  { field: 'bill20', label: '20 bill', value: 20 },
+  { field: 'coin20', label: '20 coin', value: 20 },
+  { field: 'coin10', label: '10 coin', value: 10 },
+  { field: 'coin5', label: '5 coin', value: 5 },
+  { field: 'coin1', label: '1 coin', value: 1 },
+] as const
+
+type WithdrawDenominationKey = typeof withdrawDenominations[number]['field']
+
 const menuItems: Array<{ key: MenuKey; label: string; icon: string }> = [
-  { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
-  { key: 'goals', label: 'Goals', icon: '🎯' },
-  { key: 'transactions', label: 'Transactions', icon: '🧾' },
-  { key: 'statistics', label: 'Statistics', icon: '📊' },
-  { key: 'settings', label: 'Settings', icon: '⚙️' },
-  { key: 'profile', label: 'Profile', icon: '👤' },
+  { key: 'dashboard', label: 'Dashboard', icon: '▦' },
+  { key: 'transactions', label: 'Transactions', icon: '◍' },
+  { key: 'settings', label: 'Settings', icon: '◌' },
+  { key: 'profile', label: 'Profile', icon: '◉' },
 ]
 
 const initialKidGoals: Goal[] = []
@@ -73,7 +123,6 @@ const STORAGE_KEYS = {
   kidNotifications: 'cash_kid_notifications',
   kidShowBalance: 'cash_kid_show_balance',
   kidRequireNote: 'cash_kid_require_note',
-  kidDailyLimit: 'cash_kid_daily_limit',
   parentAlerts: 'cash_parent_spending_alerts',
   parentAutoApproveLimit: 'cash_parent_auto_approve_limit',
   kidGoals: 'cash_kid_goals',
@@ -125,7 +174,13 @@ function estimateWithdrawalSeconds(amount: number): number {
   return Math.min(120, Math.max(8, 3 + billCountEstimate * 2))
 }
 
-async function persistAccountDeposit(username: string, amount: number, role: Role, note: string): Promise<{ balance: number | null }> {
+async function persistAccountDeposit(
+  username: string,
+  amount: number,
+  role: Role,
+  note: string,
+  parentUsername?: string
+): Promise<{ balance: number | null }> {
   let lastError = 'Failed to save deposit'
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -140,6 +195,7 @@ async function persistAccountDeposit(username: string, amount: number, role: Rol
           note,
           source: 'dashboard',
           autoCreate: true,
+          parentUsername,
         }),
       })
 
@@ -184,6 +240,24 @@ async function fetchDeviceStatus(): Promise<{ withdrawActive?: boolean; withdraw
   return res.json() as Promise<{ withdrawActive?: boolean; withdrawState?: string; updatedAt?: string }>
 }
 
+async function fetchDeviceLockStatus(): Promise<DeviceLockStatus> {
+  const res = await fetch('/api/device/lock', { cache: 'no-store' })
+  if (!res.ok) {
+    return { active: false, holder: null, mode: null, expiresAt: null }
+  }
+  return res.json() as Promise<DeviceLockStatus>
+}
+
+async function fetchLatestDepositId(): Promise<number> {
+  const res = await fetch('/api/deposit', { cache: 'no-store' })
+  if (!res.ok) {
+    return -1
+  }
+  const data = await res.json() as { deposits?: Array<{ id: number }> }
+  const ids = (data.deposits ?? []).map((item) => item.id).filter((id) => Number.isFinite(id) && id > 0)
+  return ids.length > 0 ? Math.max(...ids) : 0
+}
+
 async function acquireDeviceLock(username: string, mode: 'deposit' | 'withdraw'): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch('/api/device/lock', {
     method: 'POST',
@@ -210,13 +284,29 @@ async function releaseDeviceLock(username: string) {
   })
 }
 
+async function heartbeatDeviceLock(username: string) {
+  await fetch('/api/device/lock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'heartbeat', username, ttlSeconds: 120 }),
+  })
+}
+
 export default function DashboardPage() {
   const router = useRouter()
   const [role, setRole] = useState<Role>('kid')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('dashboard')
+  const [kidQuickSection, setKidQuickSection] = useState<KidQuickSection>('none')
+  const [parentQuickSection, setParentQuickSection] = useState<ParentQuickSection>('none')
+  const [showKidMoreActions, setShowKidMoreActions] = useState(false)
+  const [showParentMoreActions, setShowParentMoreActions] = useState(false)
   const [balance, setBalance] = useState(0)
-  const [withdrawAmount, setWithdrawAmount] = useState('')
   const [withdrawNote, setWithdrawNote] = useState('')
+  const [withdrawDenomination, setWithdrawDenomination] = useState<WithdrawDenominationKey>('bill100')
+  const [withdrawQuantity, setWithdrawQuantity] = useState('1')
+  const [machineInventory, setMachineInventory] = useState<MachineInventory | null>(null)
+  const [machineInventoryTotalValue, setMachineInventoryTotalValue] = useState(0)
+  const [inventoryLoading, setInventoryLoading] = useState(true)
   const [instantWithdrawals, setInstantWithdrawals] = useState(false)
   const [pendingWithdrawals, setPendingWithdrawals] = useState<PendingWithdrawal[]>([])
   const [history, setHistory] = useState<WithdrawalRecord[]>(defaultHistory)
@@ -224,7 +314,6 @@ export default function DashboardPage() {
   const [kidNotifications, setKidNotifications] = useState(true)
   const [kidShowBalance, setKidShowBalance] = useState(true)
   const [kidRequireNote, setKidRequireNote] = useState(false)
-  const [kidDailyWithdrawLimit, setKidDailyWithdrawLimit] = useState(25)
   const [parentSpendingAlerts, setParentSpendingAlerts] = useState(true)
   const [parentAutoApproveLimit, setParentAutoApproveLimit] = useState(0)
   // Device WiFi configuration (sent to ESP32 via SETWIFI command queue)
@@ -253,11 +342,16 @@ export default function DashboardPage() {
     phase: 'idle',
     message: '',
   })
-  const [parentWithdrawAmount, setParentWithdrawAmount] = useState('')
+  const [activeWithdrawLockOwner, setActiveWithdrawLockOwner] = useState<string | null>(null)
+  const [deviceLockStatus, setDeviceLockStatus] = useState<DeviceLockStatus>({
+    active: false,
+    holder: null,
+    mode: null,
+    expiresAt: null,
+  })
   const [parentWithdrawNote, setParentWithdrawNote] = useState('')
   const [parentWithdrawBusy, setParentWithdrawBusy] = useState(false)
   const [parentChildWithdrawKid, setParentChildWithdrawKid] = useState('')
-  const [parentChildWithdrawAmount, setParentChildWithdrawAmount] = useState('')
   const [parentChildWithdrawNote, setParentChildWithdrawNote] = useState('')
   const [parentChildWithdrawBusy, setParentChildWithdrawBusy] = useState(false)
   const [pendingDepositKid, setPendingDepositKid] = useState<string | null>(null)
@@ -268,11 +362,49 @@ export default function DashboardPage() {
   const [depositToast, setDepositToast] = useState<string | null>(null)
   const [lastHardwareDepositAt, setLastHardwareDepositAt] = useState<string | null>(null)
   const [lastHardwareDepositAmount, setLastHardwareDepositAmount] = useState<number | null>(null)
+  const [depositDebug, setDepositDebug] = useState<DepositDebugState>({
+    kidSince: 0,
+    parentSince: 0,
+    kidEventSince: 0,
+    parentEventSince: 0,
+    lastBatchCount: 0,
+    lastBatchMaxId: 0,
+    lastEventBatchCount: 0,
+    lastEventMaxId: 0,
+    lastBatchAmount: 0,
+    lastPollAt: '',
+  })
   const [kidDepositModalOpen, setKidDepositModalOpen] = useState(false)
   const [depositCountdown, setDepositCountdown] = useState(DEPOSIT_COUNTDOWN_SECONDS)
   const kidLastSeenDepositIdRef = useRef(0)
+  const kidLastSeenDepositEventIdRef = useRef(0)
   const parentLastSeenDepositIdRef = useRef(0)
+  const parentLastSeenDepositEventIdRef = useRef(0)
   const withdrawStartedAtRef = useRef(0)
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // Continue local sign-out flow even if request fails.
+    }
+    sessionStorage.clear()
+    router.replace('/login')
+  }
+
+  const refreshInventory = async () => {
+    try {
+      const res = await fetch('/api/inventory', { cache: 'no-store' })
+      if (!res.ok) {
+        return
+      }
+      const data = await res.json() as InventoryResponse
+      setMachineInventory(data.inventory ?? null)
+      setMachineInventoryTotalValue(Math.round(Number(data.totalValue ?? 0) * 100) / 100)
+    } catch {
+      // Keep current inventory view if polling momentarily fails.
+    }
+  }
 
   const kidGoals = useMemo(() => {
     if (!kidName) return initialKidGoals
@@ -280,89 +412,104 @@ export default function DashboardPage() {
   }, [kidGoalsByAccount, kidName])
 
   useEffect(() => {
-    const storedRole = sessionStorage.getItem(STORAGE_KEYS.role)
-    const role = storedRole === 'parent' ? 'parent' : 'kid'
-    setRole(role)
+    const hydrateSession = async () => {
+      const sessionRes = await fetch('/api/auth/session', { cache: 'no-store' })
+      if (!sessionRes.ok) {
+        sessionStorage.clear()
+        router.replace('/login')
+        return
+      }
 
-    const loadedGoalsByAccount = safeParse<Record<string, Goal[]>>(
-      localStorage.getItem(STORAGE_KEYS.kidGoalsByAccount),
-      {}
-    )
+      const sessionData = await sessionRes.json() as {
+        account: { username: string; role: Role; balance: number }
+      }
+      const role = sessionData.account.role
+      const username = sessionData.account.username
 
-    const username = sessionStorage.getItem('cash_username')
+      sessionStorage.setItem(STORAGE_KEYS.role, role)
+      sessionStorage.setItem('cash_username', username)
+      setRole(role)
 
-    // If kid, set their name from username
-    if (role === 'kid') {
-      if (username) {
-        setKidName(username)
+      const loadedGoalsByAccount = safeParse<Record<string, Goal[]>>(
+        localStorage.getItem(STORAGE_KEYS.kidGoalsByAccount),
+        {}
+      )
 
-        if (!loadedGoalsByAccount[username]) {
-          const legacyGoals = safeParse<Goal[]>(
-            localStorage.getItem(STORAGE_KEYS.kidGoals),
-            initialKidGoals
-          )
-          if (legacyGoals.length > 0) {
-            loadedGoalsByAccount[username] = legacyGoals
+      // If kid, set their name from username
+      if (role === 'kid') {
+        if (username) {
+          setKidName(username)
+
+          if (!loadedGoalsByAccount[username]) {
+            const legacyGoals = safeParse<Goal[]>(
+              localStorage.getItem(STORAGE_KEYS.kidGoals),
+              initialKidGoals
+            )
+            if (legacyGoals.length > 0) {
+              loadedGoalsByAccount[username] = legacyGoals
+            }
           }
         }
+      } else {
+        if (username) {
+          setParentName(username)
+          setParentBalance(Math.round((sessionData.account.balance ?? 0) * 100) / 100)
+        }
       }
-    } else {
-      if (username) {
-        setParentName(username)
+
+      setKidGoalsByAccount(loadedGoalsByAccount)
+
+      setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
+
+      const storedNotifications = localStorage.getItem(STORAGE_KEYS.kidNotifications)
+      if (storedNotifications) {
+        setKidNotifications(storedNotifications === 'true')
       }
-    }
 
-    setKidGoalsByAccount(loadedGoalsByAccount)
-
-    setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
-
-    const storedNotifications = localStorage.getItem(STORAGE_KEYS.kidNotifications)
-    if (storedNotifications) {
-      setKidNotifications(storedNotifications === 'true')
-    }
-
-    const storedShowBalance = localStorage.getItem(STORAGE_KEYS.kidShowBalance)
-    if (storedShowBalance) {
-      setKidShowBalance(storedShowBalance === 'true')
-    }
-
-    const storedRequireNote = localStorage.getItem(STORAGE_KEYS.kidRequireNote)
-    if (storedRequireNote) {
-      setKidRequireNote(storedRequireNote === 'true')
-    }
-
-    const storedDailyLimit = localStorage.getItem(STORAGE_KEYS.kidDailyLimit)
-    if (storedDailyLimit) {
-      const parsedLimit = Number(storedDailyLimit)
-      if (Number.isFinite(parsedLimit) && parsedLimit > 0) {
-        setKidDailyWithdrawLimit(parsedLimit)
+      const storedShowBalance = localStorage.getItem(STORAGE_KEYS.kidShowBalance)
+      if (storedShowBalance) {
+        setKidShowBalance(storedShowBalance === 'true')
       }
-    }
 
-    const storedParentAlerts = localStorage.getItem(STORAGE_KEYS.parentAlerts)
-    if (storedParentAlerts) {
-      setParentSpendingAlerts(storedParentAlerts === 'true')
-    }
-
-    const storedAutoApproveLimit = localStorage.getItem(STORAGE_KEYS.parentAutoApproveLimit)
-    if (storedAutoApproveLimit) {
-      const parsedLimit = Number(storedAutoApproveLimit)
-      if (Number.isFinite(parsedLimit) && parsedLimit >= 0) {
-        setParentAutoApproveLimit(parsedLimit)
+      const storedRequireNote = localStorage.getItem(STORAGE_KEYS.kidRequireNote)
+      if (storedRequireNote) {
+        setKidRequireNote(storedRequireNote === 'true')
       }
-    }
 
-    const storedCharacter = localStorage.getItem(STORAGE_KEYS.kidCharacter)
-    if (storedCharacter) {
-      setKidCharacter(storedCharacter)
-    }
+      const storedParentAlerts = localStorage.getItem(STORAGE_KEYS.parentAlerts)
+      if (storedParentAlerts) {
+        setParentSpendingAlerts(storedParentAlerts === 'true')
+      }
 
-    void (async () => {
+      const storedAutoApproveLimit = localStorage.getItem(STORAGE_KEYS.parentAutoApproveLimit)
+      if (storedAutoApproveLimit) {
+        const parsedLimit = Number(storedAutoApproveLimit)
+        if (Number.isFinite(parsedLimit) && parsedLimit >= 0) {
+          setParentAutoApproveLimit(parsedLimit)
+        }
+      }
+
+      const storedCharacter = localStorage.getItem(STORAGE_KEYS.kidCharacter)
+      if (storedCharacter) {
+        setKidCharacter(storedCharacter)
+      }
+
       try {
+        const parentScope = role === 'parent' && username ? `?parent=${encodeURIComponent(username)}` : ''
+        const kidsUrl = role === 'parent'
+          ? `/api/auth/kids${parentScope}`
+          : `/api/auth/kids${username ? `?username=${encodeURIComponent(username)}` : ''}`
+        const pendingUrl = role === 'parent'
+          ? `/api/pending-withdrawals${parentScope}`
+          : `/api/pending-withdrawals${username ? `?child=${encodeURIComponent(username)}` : ''}`
+        const txUrl = role === 'parent'
+          ? `/api/accounts/transactions${parentScope}`
+          : `/api/accounts/transactions${username ? `?username=${encodeURIComponent(username)}` : ''}`
+
         const [kidsRes, pendingRes, txRes] = await Promise.all([
-          fetch('/api/auth/kids', { cache: 'no-store' }),
-          fetch('/api/pending-withdrawals', { cache: 'no-store' }),
-          fetch('/api/accounts/transactions', { cache: 'no-store' }),
+          fetch(kidsUrl, { cache: 'no-store' }),
+          fetch(pendingUrl, { cache: 'no-store' }),
+          fetch(txUrl, { cache: 'no-store' }),
         ])
 
         if (kidsRes.ok) {
@@ -410,11 +557,13 @@ export default function DashboardPage() {
       } catch {
         // Keep UI usable even when API is temporarily unavailable.
       }
-    })()
 
-    setIsHydrated(true)
+      setIsHydrated(true)
+    }
 
-  }, [])
+    void hydrateSession()
+
+  }, [router])
 
   useEffect(() => {
     if (!isHydrated) return
@@ -422,7 +571,6 @@ export default function DashboardPage() {
     localStorage.setItem(STORAGE_KEYS.kidNotifications, String(kidNotifications))
     localStorage.setItem(STORAGE_KEYS.kidShowBalance, String(kidShowBalance))
     localStorage.setItem(STORAGE_KEYS.kidRequireNote, String(kidRequireNote))
-    localStorage.setItem(STORAGE_KEYS.kidDailyLimit, String(kidDailyWithdrawLimit))
     localStorage.setItem(STORAGE_KEYS.parentAlerts, String(parentSpendingAlerts))
     localStorage.setItem(STORAGE_KEYS.parentAutoApproveLimit, String(parentAutoApproveLimit))
     localStorage.setItem(STORAGE_KEYS.kidGoalsByAccount, JSON.stringify(kidGoalsByAccount))
@@ -433,7 +581,6 @@ export default function DashboardPage() {
     kidNotifications,
     kidShowBalance,
     kidRequireNote,
-    kidDailyWithdrawLimit,
     parentSpendingAlerts,
     parentAutoApproveLimit,
     kidGoalsByAccount,
@@ -462,6 +609,154 @@ export default function DashboardPage() {
       cancelled = true
     }
   }, [isHydrated, role, parentName])
+
+  // Keep key account data synced from server to avoid stale UI during multi-session use.
+  useEffect(() => {
+    if (!isHydrated) return
+
+    let cancelled = false
+
+    const syncAuthoritativeData = async () => {
+      try {
+        const sessionRes = await fetch('/api/auth/session', { cache: 'no-store' })
+        if (!sessionRes.ok) {
+          if (!cancelled) {
+            sessionStorage.clear()
+            router.replace('/login')
+          }
+          return
+        }
+
+        const sessionData = await sessionRes.json() as {
+          account: { username: string; role: Role; balance: number }
+        }
+
+        if (role === 'kid' && kidName) {
+          const [balanceRes, pendingRes, txRes] = await Promise.all([
+            fetch(`/api/accounts/balance?username=${encodeURIComponent(kidName)}`, { cache: 'no-store' }),
+            fetch(`/api/pending-withdrawals?child=${encodeURIComponent(kidName)}`, { cache: 'no-store' }),
+            fetch(`/api/accounts/transactions?username=${encodeURIComponent(kidName)}`, { cache: 'no-store' }),
+          ])
+
+          if (balanceRes.ok) {
+            const balanceData = await balanceRes.json() as { account?: { balance?: number } }
+            const nextBalance = Number(balanceData.account?.balance ?? 0)
+            if (!cancelled && Number.isFinite(nextBalance)) {
+              const rounded = Math.round(nextBalance * 100) / 100
+              setBalance(rounded)
+              setKidBalances((prev) => ({ ...prev, [kidName]: rounded }))
+            }
+          }
+
+          if (pendingRes.ok) {
+            const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+            if (!cancelled) {
+              setPendingWithdrawals(pendingData.pending)
+            }
+          }
+
+          if (txRes.ok) {
+            const txData = await txRes.json() as {
+              transactions: Array<{
+                id: number
+                child: string
+                amount: number
+                signedAmount?: number
+                note: string
+                when: string
+                kind: string
+              }>
+            }
+            if (!cancelled) {
+              setHistory(
+                txData.transactions.map((entry) => ({
+                  id: entry.id,
+                  child: entry.child,
+                  amount: Math.abs(entry.signedAmount ?? entry.amount),
+                  note: entry.note,
+                  when: entry.when,
+                  kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+                }))
+              )
+            }
+          }
+        }
+
+        if (role === 'parent' && parentName) {
+          const [kidsRes, pendingRes, txRes, parentBalanceRes] = await Promise.all([
+            fetch(`/api/auth/kids?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
+            fetch(`/api/pending-withdrawals?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
+            fetch(`/api/accounts/transactions?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
+            fetch(`/api/accounts/balance?username=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
+          ])
+
+          if (kidsRes.ok) {
+            const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
+            if (!cancelled) {
+              setValidKidAccounts(kidsData.kids.map((kid) => kid.username))
+              setKidBalances(
+                kidsData.kids.reduce<Record<string, number>>((acc, kid) => {
+                  acc[kid.username] = kid.balance
+                  return acc
+                }, {})
+              )
+            }
+          }
+
+          if (pendingRes.ok) {
+            const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+            if (!cancelled) {
+              setPendingWithdrawals(pendingData.pending)
+            }
+          }
+
+          if (txRes.ok) {
+            const txData = await txRes.json() as {
+              transactions: Array<{
+                id: number
+                child: string
+                amount: number
+                signedAmount?: number
+                note: string
+                when: string
+                kind: string
+              }>
+            }
+            if (!cancelled) {
+              setHistory(
+                txData.transactions.map((entry) => ({
+                  id: entry.id,
+                  child: entry.child,
+                  amount: Math.abs(entry.signedAmount ?? entry.amount),
+                  note: entry.note,
+                  when: entry.when,
+                  kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+                }))
+              )
+            }
+          }
+
+          if (parentBalanceRes.ok) {
+            const balanceData = await parentBalanceRes.json() as { account?: { balance?: number } }
+            const nextBalance = Number(balanceData.account?.balance ?? sessionData.account.balance ?? 0)
+            if (!cancelled && Number.isFinite(nextBalance)) {
+              setParentBalance(Math.round(nextBalance * 100) / 100)
+            }
+          }
+        }
+      } catch {
+        // Ignore temporary sync errors; next cycle will retry.
+      }
+    }
+
+    void syncAuthoritativeData()
+    const interval = setInterval(() => { void syncAuthoritativeData() }, 2000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isHydrated, role, kidName, parentName, router])
 
   // Keep kid UI balance aligned with the authoritative per-account balance map.
   useEffect(() => {
@@ -519,6 +814,148 @@ export default function DashboardPage() {
     return () => controller.abort()
   }, [isHydrated, role, kidName, balance])
 
+  useEffect(() => {
+    if (!isHydrated) return
+
+    let cancelled = false
+    const loadInventory = async () => {
+      setInventoryLoading(true)
+      try {
+        if (!cancelled) {
+          await refreshInventory()
+        }
+      } catch {
+        if (!cancelled) {
+          setMachineInventory(null)
+          setMachineInventoryTotalValue(0)
+        }
+      } finally {
+        if (!cancelled) {
+          setInventoryLoading(false)
+        }
+      }
+    }
+
+    void loadInventory()
+    return () => {
+      cancelled = true
+    }
+  }, [isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) return
+
+    let cancelled = false
+    const tick = async () => {
+      if (cancelled) return
+      await refreshInventory()
+    }
+
+    const interval = setInterval(() => { void tick() }, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) return
+
+    let cancelled = false
+    const pollLock = async () => {
+      const status = await fetchDeviceLockStatus()
+      if (!cancelled) {
+        setDeviceLockStatus(status)
+      }
+    }
+
+    void pollLock()
+    const interval = setInterval(() => { void pollLock() }, 1000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) return
+
+    const depositActive = kidDepositModalOpen || pendingDepositKid !== null
+    const withdrawActive = withdrawProgress.open && (
+      withdrawProgress.phase === 'locking' ||
+      withdrawProgress.phase === 'sending' ||
+      withdrawProgress.phase === 'dispensing' ||
+      withdrawProgress.phase === 'finalizing'
+    )
+
+    if (!depositActive && !withdrawActive) {
+      return
+    }
+
+    let cancelled = false
+    const pollInventory = async () => {
+      if (cancelled) return
+      await refreshInventory()
+    }
+
+    void pollInventory()
+    const interval = setInterval(() => { void pollInventory() }, 1000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [
+    isHydrated,
+    kidDepositModalOpen,
+    pendingDepositKid,
+    withdrawProgress.open,
+    withdrawProgress.phase,
+  ])
+
+  useEffect(() => {
+    if (!isHydrated) return
+
+    const depositActive = kidDepositModalOpen || pendingDepositKid !== null
+    const withdrawActive = withdrawProgress.open && (
+      withdrawProgress.phase === 'locking' ||
+      withdrawProgress.phase === 'sending' ||
+      withdrawProgress.phase === 'dispensing' ||
+      withdrawProgress.phase === 'finalizing'
+    )
+
+    const lockOwner = activeWithdrawLockOwner
+      ?? (kidDepositModalOpen ? kidName : (pendingDepositKid ? (parentName || pendingDepositKid) : null))
+
+    if (!lockOwner || (!depositActive && !withdrawActive)) {
+      return
+    }
+
+    let cancelled = false
+    const sendHeartbeat = async () => {
+      if (cancelled) return
+      await heartbeatDeviceLock(lockOwner)
+    }
+
+    void sendHeartbeat()
+    const interval = setInterval(() => { void sendHeartbeat() }, 30000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [
+    isHydrated,
+    activeWithdrawLockOwner,
+    kidDepositModalOpen,
+    pendingDepositKid,
+    parentName,
+    kidName,
+    withdrawProgress.open,
+    withdrawProgress.phase,
+  ])
+
   // Poll for hardware deposits only while the kid deposit modal is open.
   useEffect(() => {
     if (!isHydrated || role !== 'kid' || !kidName || !kidDepositModalOpen) return
@@ -529,15 +966,48 @@ export default function DashboardPage() {
       if (running) return
       running = true
       try {
-        const res = await fetch(`/api/deposit?since=${kidLastSeenDepositIdRef.current}`, { cache: 'no-store' })
+        if (kidLastSeenDepositIdRef.current > 0) {
+          const latestId = await fetchLatestDepositId()
+          if (latestId >= 0 && kidLastSeenDepositIdRef.current > latestId) {
+            kidLastSeenDepositIdRef.current = latestId
+          }
+        }
+        const since = kidLastSeenDepositIdRef.current
+        const eventSince = kidLastSeenDepositEventIdRef.current
+        setDepositDebug((prev) => ({ ...prev, kidSince: since, kidEventSince: eventSince }))
+        const res = await fetch(`/api/deposit?since=${since}&eventSince=${eventSince}`, { cache: 'no-store' })
         if (!res.ok) { running = false; return }
-        const data = await res.json() as { deposits: { id: number; amount: number }[] }
-        if (!data.deposits || data.deposits.length === 0) { running = false; return }
-        kidLastSeenDepositIdRef.current = Math.max(
-          kidLastSeenDepositIdRef.current,
-          ...data.deposits.map((d) => d.id)
-        )
-        const total = Math.round(data.deposits.filter((d) => d.amount > 0).reduce((sum, d) => sum + d.amount, 0) * 100) / 100
+        const data = await res.json() as {
+          deposits: { id: number; amount: number }[]
+          events?: { id: number; amount: number }[]
+        }
+        const deposits = data.deposits ?? []
+        const events = data.events ?? []
+        if (deposits.length === 0 && events.length === 0) { running = false; return }
+
+        const maxId = deposits.length > 0 ? Math.max(...deposits.map((d) => d.id)) : 0
+        const maxEventId = events.length > 0 ? Math.max(...events.map((e) => e.id)) : 0
+        const depositBatchAmount = Math.round(deposits.filter((d) => d.amount > 0).reduce((sum, d) => sum + d.amount, 0) * 100) / 100
+        const eventBatchAmount = Math.round(events.filter((e) => e.amount > 0).reduce((sum, e) => sum + e.amount, 0) * 100) / 100
+        const batchAmount = deposits.length > 0 ? depositBatchAmount : eventBatchAmount
+
+        setDepositDebug((prev) => ({
+          ...prev,
+          lastBatchCount: deposits.length,
+          lastBatchMaxId: maxId,
+          lastEventBatchCount: events.length,
+          lastEventMaxId: maxEventId,
+          lastBatchAmount: batchAmount,
+          lastPollAt: new Date().toLocaleTimeString('en-PH'),
+        }))
+        if (deposits.length > 0) {
+          kidLastSeenDepositIdRef.current = Math.max(kidLastSeenDepositIdRef.current, ...deposits.map((d) => d.id))
+        }
+        if (events.length > 0) {
+          kidLastSeenDepositEventIdRef.current = Math.max(kidLastSeenDepositEventIdRef.current, ...events.map((e) => e.id))
+        }
+
+        const total = batchAmount
         if (total > 0 && !cancelled) {
           setPendingDepositReceived((prev) => Math.round((prev + total) * 100) / 100)
           setLastHardwareDepositAt(new Date().toLocaleTimeString('en-PH'))
@@ -569,20 +1039,54 @@ export default function DashboardPage() {
       if (running) return
       running = true
       try {
-        const res = await fetch(`/api/deposit?since=${parentLastSeenDepositIdRef.current}`, { cache: 'no-store' })
+        if (parentLastSeenDepositIdRef.current > 0) {
+          const latestId = await fetchLatestDepositId()
+          if (latestId >= 0 && parentLastSeenDepositIdRef.current > latestId) {
+            parentLastSeenDepositIdRef.current = latestId
+          }
+        }
+        const since = parentLastSeenDepositIdRef.current
+        const eventSince = parentLastSeenDepositEventIdRef.current
+        setDepositDebug((prev) => ({ ...prev, parentSince: since, parentEventSince: eventSince }))
+        const res = await fetch(`/api/deposit?since=${since}&eventSince=${eventSince}`, { cache: 'no-store' })
         if (!res.ok) { running = false; return }
-        const data = await res.json() as { deposits: { id: number; amount: number }[] }
-        if (!data.deposits || data.deposits.length === 0 || cancelled) { running = false; return }
-        parentLastSeenDepositIdRef.current = Math.max(
-          parentLastSeenDepositIdRef.current,
-          ...data.deposits.map((d) => d.id)
-        )
+        const data = await res.json() as {
+          deposits: { id: number; amount: number }[]
+          events?: { id: number; amount: number }[]
+        }
+        const deposits = data.deposits ?? []
+        const events = data.events ?? []
+        if ((deposits.length === 0 && events.length === 0) || cancelled) { running = false; return }
 
-        const total = Math.round(
-          data.deposits
+        const maxId = deposits.length > 0 ? Math.max(...deposits.map((d) => d.id)) : 0
+        const maxEventId = events.length > 0 ? Math.max(...events.map((e) => e.id)) : 0
+        const depositBatchAmount = Math.round(
+          deposits
             .filter((d) => Number.isFinite(d.amount) && d.amount > 0)
             .reduce((sum, d) => sum + d.amount, 0) * 100
         ) / 100
+        const eventBatchAmount = Math.round(
+          events
+            .filter((e) => Number.isFinite(e.amount) && e.amount > 0)
+            .reduce((sum, e) => sum + e.amount, 0) * 100
+        ) / 100
+        const total = deposits.length > 0 ? depositBatchAmount : eventBatchAmount
+
+        setDepositDebug((prev) => ({
+          ...prev,
+          lastBatchCount: deposits.length,
+          lastBatchMaxId: maxId,
+          lastEventBatchCount: events.length,
+          lastEventMaxId: maxEventId,
+          lastBatchAmount: total,
+          lastPollAt: new Date().toLocaleTimeString('en-PH'),
+        }))
+        if (deposits.length > 0) {
+          parentLastSeenDepositIdRef.current = Math.max(parentLastSeenDepositIdRef.current, ...deposits.map((d) => d.id))
+        }
+        if (events.length > 0) {
+          parentLastSeenDepositEventIdRef.current = Math.max(parentLastSeenDepositEventIdRef.current, ...events.map((e) => e.id))
+        }
 
         if (total > 0) {
           setPendingDepositReceived((prev) => Math.round((prev + total) * 100) / 100)
@@ -665,7 +1169,7 @@ export default function DashboardPage() {
           const credited = Math.round(pendingDepositReceived * 100) / 100
           try {
             if (pendingDepositKid === parentName) {
-              const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (self)')
+              const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (self)', parentName)
               const latestBalance = saved.balance ?? await fetchAccountBalance(parentName)
               if (latestBalance !== null) {
                 setParentBalance(latestBalance)
@@ -673,7 +1177,7 @@ export default function DashboardPage() {
                 setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
               }
             } else {
-              const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (parent confirmation)')
+              const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (parent confirmation)', parentName)
               const latestBalance = saved.balance ?? await fetchAccountBalance(pendingDepositKid)
               if (latestBalance !== null) {
                 setKidBalances((prev) => ({ ...prev, [pendingDepositKid]: latestBalance }))
@@ -720,24 +1224,6 @@ export default function DashboardPage() {
 
   const visibleMenuItems = role === 'kid' ? menuItems.filter((item) => item.key !== 'settings') : menuItems
 
-  // Only 20, 50, 100, 500, 1000 PHP bills are stocked.
-  const canWithdraw = useMemo(() => {
-    const amount = Number(withdrawAmount)
-    const noteOk = !kidRequireNote || withdrawNote.trim().length >= 3
-    return (
-      Number.isFinite(amount) &&
-      amount > 0 &&
-      amount <= balance &&
-      amount <= kidDailyWithdrawLimit &&
-      noteOk
-    )
-  }, [withdrawAmount, balance, kidDailyWithdrawLimit, kidRequireNote, withdrawNote])
-
-  const canParentWithdraw = useMemo(() => {
-    const amount = Number(parentWithdrawAmount)
-    return Number.isFinite(amount) && amount > 0 && amount <= parentBalance
-  }, [parentWithdrawAmount, parentBalance])
-
   const kidHistory = history.filter((entry) => entry.child === kidName)
   const pendingForKid = pendingWithdrawals.filter((entry) => entry.child === kidName)
   const kidHistorySigned = kidHistory.map((item) => ({
@@ -780,14 +1266,21 @@ export default function DashboardPage() {
     balance: kidBalances[username] || 0,
     withdrawalsThisWeek: history.filter((entry) => entry.child === username).length,
   }))
+  const selectedWithdrawDenomination = withdrawDenominations.find((option) => option.field === withdrawDenomination) ?? withdrawDenominations[2]
+  const selectedWithdrawCount = Math.max(1, Number.isFinite(Number(withdrawQuantity)) ? Math.round(Number(withdrawQuantity)) : 1)
+  const selectedWithdrawAmount = selectedWithdrawDenomination.value * selectedWithdrawCount
+  const selectedWithdrawInventoryCount = machineInventory?.[selectedWithdrawDenomination.field] ?? 0
+  const machineCashStock = withdrawDenominations.map((option) => ({
+    field: option.field,
+    label: option.label,
+    count: machineInventory?.[option.field] ?? 0,
+  }))
   const selectedChildBalance = useMemo(() => {
     if (!parentChildWithdrawKid) return 0
     return kidBalances[parentChildWithdrawKid] ?? parentChildren.find((child) => child.name === parentChildWithdrawKid)?.balance ?? 0
   }, [kidBalances, parentChildWithdrawKid, parentChildren])
-  const canParentChildWithdraw = useMemo(() => {
-    const amount = Number(parentChildWithdrawAmount)
-    return Number.isFinite(amount) && amount > 0 && amount <= selectedChildBalance && !!parentChildWithdrawKid
-  }, [parentChildWithdrawAmount, parentChildWithdrawKid, selectedChildBalance])
+  const canWithdrawBySelection = selectedWithdrawAmount > 0 && selectedWithdrawInventoryCount >= selectedWithdrawCount
+  const canParentChildWithdraw = !!parentChildWithdrawKid && canWithdrawBySelection && selectedWithdrawAmount <= selectedChildBalance
   const parentSpendingByChild = parentChildren.map((child) => ({
     name: child.name,
     amount: history
@@ -809,6 +1302,26 @@ export default function DashboardPage() {
       key: `${username}-${goal.id}`,
     }))
   )
+  const currentUserName = (role === 'kid' ? kidName : parentName).trim().toLowerCase()
+  const lockHeldByOtherUser =
+    deviceLockStatus.active &&
+    !!deviceLockStatus.holder &&
+    !!currentUserName &&
+    deviceLockStatus.holder !== currentUserName
+  const deviceUsableForCurrentUser = !lockHeldByOtherUser
+
+  const canWithdraw = useMemo(() => {
+    const noteOk = !kidRequireNote || withdrawNote.trim().length >= 3
+    return (
+      selectedWithdrawAmount > 0 &&
+      selectedWithdrawAmount <= balance &&
+      noteOk &&
+      canWithdrawBySelection &&
+      !inventoryLoading
+    )
+  }, [balance, canWithdrawBySelection, inventoryLoading, kidRequireNote, selectedWithdrawAmount, withdrawNote])
+
+  const canParentWithdraw = selectedWithdrawAmount > 0 && selectedWithdrawAmount <= parentBalance && canWithdrawBySelection && !inventoryLoading
 
   const parentAlerts = [
     instantWithdrawals
@@ -848,7 +1361,7 @@ export default function DashboardPage() {
   }
 
   const resetWithdrawForm = () => {
-    setWithdrawAmount('')
+    setWithdrawQuantity('1')
     setWithdrawNote('')
   }
 
@@ -856,7 +1369,7 @@ export default function DashboardPage() {
     e.preventDefault()
     if (!canWithdraw) return
 
-    const amount = Number(withdrawAmount)
+    const amount = selectedWithdrawAmount
     const note = withdrawNote.trim() || 'Withdrawal'
 
     if (instantWithdrawals || (parentAutoApproveLimit > 0 && amount <= parentAutoApproveLimit)) {
@@ -867,6 +1380,7 @@ export default function DashboardPage() {
         alert(`❌ ${lock.message}`)
         return
       }
+      setActiveWithdrawLockOwner(kidName)
 
       setWithdrawPhase('sending', 'Sending withdrawal command to the machine...')
       const res = await fetch('/api/command', {
@@ -874,6 +1388,8 @@ export default function DashboardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           command: `WITHDRAW ${Math.round(amount)}`,
+          denomination: selectedWithdrawDenomination.field,
+          quantity: selectedWithdrawCount,
           account: kidName,
           lockOwner: kidName,
           role: 'kid',
@@ -881,8 +1397,6 @@ export default function DashboardPage() {
           note,
         }),
       })
-
-      await releaseDeviceLock(kidName)
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Withdrawal failed' }))
@@ -913,6 +1427,8 @@ export default function DashboardPage() {
           }))
         )
       }
+
+      void refreshInventory()
     } else {
       const createRes = await fetch('/api/pending-withdrawals', {
         method: 'POST',
@@ -925,7 +1441,7 @@ export default function DashboardPage() {
         return
       }
 
-      const pendingRes = await fetch('/api/pending-withdrawals', { cache: 'no-store' })
+      const pendingRes = await fetch(`/api/pending-withdrawals?child=${encodeURIComponent(kidName)}`, { cache: 'no-store' })
       if (pendingRes.ok) {
         const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
         setPendingWithdrawals(pendingData.pending)
@@ -939,7 +1455,7 @@ export default function DashboardPage() {
     e.preventDefault()
     if (!parentName || !canParentWithdraw || parentWithdrawBusy) return
 
-    const amount = Number(parentWithdrawAmount)
+    const amount = selectedWithdrawAmount
     const note = parentWithdrawNote.trim() || 'Parent withdrawal'
 
     setParentWithdrawBusy(true)
@@ -951,6 +1467,7 @@ export default function DashboardPage() {
         alert(`❌ ${lock.message}`)
         return
       }
+      setActiveWithdrawLockOwner(parentName)
 
       setWithdrawPhase('sending', 'Sending parent withdrawal command...')
       const res = await fetch('/api/command', {
@@ -958,6 +1475,8 @@ export default function DashboardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           command: `WITHDRAW ${Math.round(amount)}`,
+          denomination: selectedWithdrawDenomination.field,
+          quantity: selectedWithdrawCount,
           account: parentName,
           lockOwner: parentName,
           role: 'parent',
@@ -965,8 +1484,6 @@ export default function DashboardPage() {
           note,
         }),
       })
-
-      await releaseDeviceLock(parentName)
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Parent withdrawal failed' }))
@@ -982,7 +1499,7 @@ export default function DashboardPage() {
         setParentBalance(Math.round(latestParentBalance * 100) / 100)
       }
 
-      const txRes = await fetch('/api/accounts/transactions', { cache: 'no-store' })
+      const txRes = await fetch(`/api/accounts/transactions?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' })
       if (txRes.ok) {
         const txData = await txRes.json() as {
           transactions: Array<{
@@ -1007,8 +1524,10 @@ export default function DashboardPage() {
         )
       }
 
-      setParentWithdrawAmount('')
+      void refreshInventory()
+
       setParentWithdrawNote('')
+      setWithdrawQuantity('1')
     } finally {
       setParentWithdrawBusy(false)
     }
@@ -1018,7 +1537,7 @@ export default function DashboardPage() {
     e.preventDefault()
     if (!parentName || !parentChildWithdrawKid || parentChildWithdrawBusy) return
 
-    const amount = Number(parentChildWithdrawAmount)
+    const amount = selectedWithdrawAmount
     const note = parentChildWithdrawNote.trim() || `Parent withdrew from ${parentChildWithdrawKid}`
     const childBalance = kidBalances[parentChildWithdrawKid] ?? parentChildren.find((child) => child.name === parentChildWithdrawKid)?.balance ?? 0
 
@@ -1035,6 +1554,7 @@ export default function DashboardPage() {
         alert(`❌ ${lock.message}`)
         return
       }
+      setActiveWithdrawLockOwner(parentName)
 
       setWithdrawPhase('sending', `Withdrawing from ${parentChildWithdrawKid}...`)
       const res = await fetch('/api/command', {
@@ -1042,15 +1562,16 @@ export default function DashboardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           command: `WITHDRAW ${Math.round(amount)}`,
+          denomination: selectedWithdrawDenomination.field,
+          quantity: selectedWithdrawCount,
           account: parentChildWithdrawKid,
           lockOwner: parentName,
+          parentUsername: parentName,
           role: 'kid',
           autoCreate: true,
           note,
         }),
       })
-
-      await releaseDeviceLock(parentName)
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Child withdrawal failed' }))
@@ -1062,8 +1583,8 @@ export default function DashboardPage() {
       setWithdrawPhase('dispensing', `Dispensing ${formatPHP(amount)} from ${parentChildWithdrawKid}...`)
 
       const [kidsRes, txRes] = await Promise.all([
-        fetch('/api/auth/kids', { cache: 'no-store' }),
-        fetch('/api/accounts/transactions', { cache: 'no-store' }),
+        fetch(`/api/auth/kids?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
+        fetch(`/api/accounts/transactions?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' }),
       ])
 
       if (kidsRes.ok) {
@@ -1099,8 +1620,10 @@ export default function DashboardPage() {
         )
       }
 
-      setParentChildWithdrawAmount('')
+      void refreshInventory()
+
       setParentChildWithdrawNote('')
+      setWithdrawQuantity('1')
     } finally {
       setParentChildWithdrawBusy(false)
     }
@@ -1191,6 +1714,15 @@ export default function DashboardPage() {
     return () => clearTimeout(timer)
   }, [withdrawProgress.open, withdrawProgress.phase])
 
+  useEffect(() => {
+    if (!activeWithdrawLockOwner) return
+    if (withdrawProgress.phase !== 'done' && withdrawProgress.phase !== 'error') return
+
+    const owner = activeWithdrawLockOwner
+    setActiveWithdrawLockOwner(null)
+    void releaseDeviceLock(owner)
+  }, [activeWithdrawLockOwner, withdrawProgress.phase])
+
   const approvePending = async (id: number) => {
     const request = pendingWithdrawals.find((item) => item.id === id)
     if (!request) return
@@ -1203,6 +1735,7 @@ export default function DashboardPage() {
       alert(`❌ ${lock.message}`)
       return
     }
+    setActiveWithdrawLockOwner(locker)
 
     setWithdrawPhase('sending', `Sending withdrawal for ${request.child}...`)
     const commandRes = await fetch('/api/command', {
@@ -1212,13 +1745,12 @@ export default function DashboardPage() {
         command: `WITHDRAW ${Math.round(request.amount)}`,
         account: request.child,
         lockOwner: locker,
+        parentUsername: parentName || locker,
         role: 'kid',
         autoCreate: true,
         note: request.note,
       }),
     })
-
-    await releaseDeviceLock(locker)
 
     if (!commandRes.ok) {
       const data = await commandRes.json().catch(() => ({ error: 'Failed to process withdrawal request' }))
@@ -1229,12 +1761,12 @@ export default function DashboardPage() {
 
     setWithdrawPhase('dispensing', `Dispensing ${formatPHP(request.amount)} for ${request.child}...`)
 
-    await fetch(`/api/pending-withdrawals?id=${id}`, { method: 'DELETE' })
+    await fetch(`/api/pending-withdrawals?id=${id}&parent=${encodeURIComponent(parentName || locker)}`, { method: 'DELETE' })
 
     const [kidsRes, pendingRes, txRes] = await Promise.all([
-      fetch('/api/auth/kids', { cache: 'no-store' }),
-      fetch('/api/pending-withdrawals', { cache: 'no-store' }),
-      fetch('/api/accounts/transactions', { cache: 'no-store' }),
+      fetch(`/api/auth/kids?parent=${encodeURIComponent(parentName || locker)}`, { cache: 'no-store' }),
+      fetch(`/api/pending-withdrawals?parent=${encodeURIComponent(parentName || locker)}`, { cache: 'no-store' }),
+      fetch(`/api/accounts/transactions?parent=${encodeURIComponent(parentName || locker)}`, { cache: 'no-store' }),
     ])
 
     if (kidsRes.ok) {
@@ -1265,7 +1797,8 @@ export default function DashboardPage() {
   }
 
   const declinePending = async (id: number) => {
-    const res = await fetch(`/api/pending-withdrawals?id=${id}`, { method: 'DELETE' })
+    const parentQuery = parentName ? `&parent=${encodeURIComponent(parentName)}` : ''
+    const res = await fetch(`/api/pending-withdrawals?id=${id}${parentQuery}`, { method: 'DELETE' })
     if (!res.ok) {
       alert('❌ Failed to decline request')
       return
@@ -1281,17 +1814,22 @@ export default function DashboardPage() {
       return
     }
 
-    // Snapshot current max ID, then clear — so only deposits AFTER this
-    // moment are counted.
+    // Snapshot current max ID so only deposits AFTER this moment are counted.
+    // Always reset cursor to a concrete value (including 0) to avoid stale
+    // high-water marks blocking future detections.
+    parentLastSeenDepositIdRef.current = 0
+    parentLastSeenDepositEventIdRef.current = 0
     try {
       const res = await fetch('/api/deposit', { cache: 'no-store' })
-      const data = await res.json() as { deposits: { id: number }[] }
-      const maxId = data.deposits?.length > 0
-        ? Math.max(...data.deposits.map((d) => d.id))
-        : parentLastSeenDepositIdRef.current
+      const data = await res.json() as { deposits: { id: number }[]; events?: { id: number }[] }
+      const maxId = data.deposits?.length > 0 ? Math.max(...data.deposits.map((d) => d.id)) : 0
+      const maxEventId = data.events && data.events.length > 0 ? Math.max(...data.events.map((e) => e.id)) : 0
       parentLastSeenDepositIdRef.current = maxId
-    } catch { /* keep existing ref */ }
-    await fetch('/api/deposit/clear', { method: 'POST' })
+      parentLastSeenDepositEventIdRef.current = maxEventId
+    } catch {
+      parentLastSeenDepositIdRef.current = 0
+      parentLastSeenDepositEventIdRef.current = 0
+    }
 
     setPendingDepositKid(username)
     setPendingDepositTarget(0)
@@ -1306,6 +1844,7 @@ export default function DashboardPage() {
       void releaseDeviceLock(locker)
     }
     parentLastSeenDepositIdRef.current = 0
+    parentLastSeenDepositEventIdRef.current = 0
     setPendingDepositKid(null)
     setPendingDepositTarget(0)
     setPendingDepositReceived(0)
@@ -1319,7 +1858,7 @@ export default function DashboardPage() {
     const credited = Math.round(pendingDepositReceived * 100) / 100
     try {
       if (pendingDepositKid === parentName) {
-        const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (manual confirmation)')
+        const saved = await persistAccountDeposit(parentName, credited, 'parent', 'Hardware deposit (manual confirmation)', parentName)
         const latestBalance = saved.balance ?? await fetchAccountBalance(parentName)
         if (latestBalance !== null) {
           setParentBalance(latestBalance)
@@ -1327,7 +1866,7 @@ export default function DashboardPage() {
           setParentBalance((prev) => Math.round((prev + credited) * 100) / 100)
         }
       } else {
-        const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (manual confirmation)')
+        const saved = await persistAccountDeposit(pendingDepositKid, credited, 'kid', 'Hardware deposit (manual confirmation)', parentName)
         const latestBalance = saved.balance ?? await fetchAccountBalance(pendingDepositKid)
         if (latestBalance !== null) {
           setKidBalances((prev) => ({ ...prev, [pendingDepositKid]: latestBalance }))
@@ -1384,166 +1923,231 @@ export default function DashboardPage() {
     setNewGoalTarget('')
   }
 
+  const openKidDepositModal = async () => {
+    const lock = await acquireDeviceLock(kidName, 'deposit')
+    if (!lock.ok) {
+      alert(`❌ ${lock.message}`)
+      return
+    }
+
+    kidLastSeenDepositIdRef.current = 0
+    kidLastSeenDepositEventIdRef.current = 0
+    try {
+      const res = await fetch('/api/deposit', { cache: 'no-store' })
+      const data = await res.json() as { deposits: { id: number }[]; events?: { id: number }[] }
+      kidLastSeenDepositIdRef.current = data.deposits?.length > 0
+        ? Math.max(...data.deposits.map((d) => d.id))
+        : 0
+      kidLastSeenDepositEventIdRef.current = data.events && data.events.length > 0
+        ? Math.max(...data.events.map((e) => e.id))
+        : 0
+    } catch {
+      kidLastSeenDepositIdRef.current = 0
+      kidLastSeenDepositEventIdRef.current = 0
+    }
+
+    setPendingDepositReceived(0)
+    setPendingDepositError(null)
+    setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
+    setKidDepositModalOpen(true)
+  }
+
   const kidDashboardView = (
-    <section className="space-y-3 sm:space-y-6">
-      {kidName && (
-        <div className="glass-card bg-gradient-to-r from-blue-500/10 to-teal-500/10">
-          <h2 className="text-lg sm:text-3xl font-sora font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500">
-            Welcome back, {kidName}! 👋
-          </h2>
-        </div>
-      )}
-      
-      <div className="glass-card">
-        <p className="text-gray-700 font-inter font-semibold text-sm sm:text-base">Current Balance</p>
-        <h2 className="text-2xl sm:text-5xl font-sora font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500 mt-1 break-words">
+    <section className="space-y-4 sm:space-y-6">
+      <div className="relative overflow-hidden rounded-2xl border-2 border-blue-200 bg-gradient-to-r from-blue-600 via-sky-500 to-teal-500 p-5 sm:p-6 shadow-lg">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(255,255,255,0.24),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.08),transparent)]" />
+        <div className="relative z-10 max-w-sm">
+        <p className="text-[11px] uppercase tracking-[0.22em] text-white/80 font-inter font-semibold">Current Balance</p>
+        <h2 className="text-4xl sm:text-5xl font-sora font-black text-white mt-2 drop-shadow-[0_6px_18px_rgba(12,44,87,0.34)]">
           {kidShowBalance ? formatPHP(balance) : '•••••'}
         </h2>
-        <div className="flex items-center justify-between mt-3 flex-wrap gap-3">
-          <p className="text-xs text-gray-500 font-inter">
-            {lastHardwareDepositAt && lastHardwareDepositAmount !== null
-              ? `Last received ${formatPHP(lastHardwareDepositAmount)} at ${lastHardwareDepositAt}`
-              : 'No hardware deposit yet'}
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              void (async () => {
-                const lock = await acquireDeviceLock(kidName, 'deposit')
-                if (!lock.ok) {
-                  alert(`❌ ${lock.message}`)
-                  return
-                }
-
-                // Snapshot current max deposit ID first, then clear.
-                // This ensures polling only picks up deposits created AFTER
-                // the button was tapped, not old ones still in the DB.
-                try {
-                  const res = await fetch('/api/deposit', { cache: 'no-store' })
-                  const data = await res.json() as { deposits: { id: number }[] }
-                  if (data.deposits?.length > 0) {
-                    kidLastSeenDepositIdRef.current = Math.max(...data.deposits.map((d) => d.id))
-                  }
-                } catch { /* keep existing ref */ }
-                await fetch('/api/deposit/clear', { method: 'POST' })
-                setPendingDepositReceived(0)
-                setPendingDepositError(null)
-                setDepositCountdown(DEPOSIT_COUNTDOWN_SECONDS)
-                setKidDepositModalOpen(true)
-              })()
-            }}
-            className="rounded-2xl bg-gradient-to-r from-emerald-500 via-green-500 to-lime-500 text-white px-8 py-4 font-inter font-extrabold text-lg uppercase tracking-widest shadow-xl shadow-emerald-300/60 ring-2 ring-emerald-200 animate-pulse hover:scale-105 hover:animate-none active:scale-95 transition"
-          >
-            💰 Deposit Cash
-          </button>
+        <p className="text-sm text-white/88 font-inter mt-3 leading-relaxed">
+          {lastHardwareDepositAt && lastHardwareDepositAmount !== null
+            ? `Last received ${formatPHP(lastHardwareDepositAmount)} at ${lastHardwareDepositAt}`
+            : 'No recent hardware deposit'}
+        </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <button
           type="button"
-          onClick={() => setActiveMenu('goals')}
-          className="glass-card text-left hover:scale-[1.01] transition-transform"
+          onClick={() => { void openKidDepositModal() }}
+          disabled={lockHeldByOtherUser}
+          className="dashboard-action-primary disabled:opacity-50"
         >
-          <p className="text-xs text-gray-600 font-inter">Goals Snapshot</p>
-          <p className="text-xl sm:text-3xl font-sora font-black text-blue-700 mt-1">{totalGoalProgress}%</p>
-          <p className="text-xs text-gray-700 font-inter mt-0.5">Overall progress</p>
+          <span className="sm:hidden text-lg">💰</span>
+          <span className="hidden sm:inline">Deposit</span>
         </button>
-
         <button
           type="button"
-          onClick={() => setActiveMenu('transactions')}
-          className="glass-card text-left hover:scale-[1.01] transition-transform"
+          onClick={() => setKidQuickSection((prev) => prev === 'withdraw' ? 'none' : 'withdraw')}
+          className="dashboard-action-secondary"
         >
-          <p className="text-sm text-gray-600 font-inter">Transactions</p>
-          <p className="text-3xl font-sora font-black text-blue-700 mt-2">{kidHistory.length}</p>
-          <p className="text-sm text-gray-700 font-inter mt-1">{pendingForKid.length} pending</p>
+          <span className="sm:hidden text-lg">💸</span>
+          <span className="hidden sm:inline">Withdraw</span>
         </button>
-
         <button
           type="button"
-          onClick={() => setActiveMenu('statistics')}
-          className="glass-card text-left hover:scale-[1.01] transition-transform"
+          onClick={() => setShowKidMoreActions((prev) => !prev)}
+          className="dashboard-action-soft"
         >
-          <p className="text-xs text-gray-600 font-inter">Spent Total</p>
-          <p className="text-xl sm:text-3xl font-sora font-black text-blue-700 mt-1">{formatPHP(totalKidSpent)}</p>
-          <p className="text-xs text-gray-700 font-inter mt-0.5">All withdrawals</p>
+          <span className="sm:hidden text-lg">⋯</span>
+          <span className="hidden sm:inline">{showKidMoreActions ? 'Less' : 'More'}</span>
         </button>
+      </div>
 
+      {showKidMoreActions && (
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <button
+          type="button"
+          onClick={() => setKidQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">🧾</span>
+          <span className="hidden sm:inline">Activity</span>
+        </button>
         <button
           type="button"
           onClick={() => setActiveMenu('profile')}
-          className="glass-card text-left hover:scale-[1.01] transition-transform"
+          className="dashboard-action-soft"
         >
-          <p className="text-xs text-gray-600 font-inter">Character Profile</p>
-          <p className="text-base sm:text-xl font-sora font-black text-blue-700 mt-1">
-            {selectedCharacter.emoji} {selectedCharacter.title}
-          </p>
-          <p className="text-xs text-gray-700 font-inter mt-0.5">Customize your avatar</p>
+          <span className="sm:hidden text-lg">👤</span>
+          <span className="hidden sm:inline">Profile</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMenu('settings')}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">⚙️</span>
+          <span className="hidden sm:inline">Settings</span>
         </button>
       </div>
+      )}
 
-      <div className="glass-card">
-        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Withdraw</h3>
-        <form onSubmit={handleWithdraw} className="grid gap-2 sm:gap-4 md:grid-cols-3">
+      {kidQuickSection === 'withdraw' && (
+      <div className="dashboard-panel">
+        <h3 className="text-lg sm:text-xl font-sora font-bold text-gray-900 mb-3">Withdraw Cash</h3>
+        <form onSubmit={handleWithdraw} className="grid gap-2 sm:gap-4 md:grid-cols-4">
+          <select
+            value={withdrawDenomination}
+            onChange={(e) => setWithdrawDenomination(e.target.value as WithdrawDenominationKey)}
+            className="dashboard-field"
+          >
+            {withdrawDenominations.map((option) => {
+              const count = machineInventory?.[option.field] ?? 0
+              return (
+                <option key={option.field} value={option.field}>
+                  {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                </option>
+              )
+            })}
+          </select>
           <input
             type="number"
-            min="0"
-            step="0.01"
-            value={withdrawAmount}
-            onChange={(e) => setWithdrawAmount(e.target.value)}
-            placeholder="Amount"
-            className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+            min="1"
+            step="1"
+            value={withdrawQuantity}
+            onChange={(e) => setWithdrawQuantity(e.target.value)}
+            placeholder="Qty"
+            className="dashboard-field"
           />
           <input
             type="text"
             value={withdrawNote}
             onChange={(e) => setWithdrawNote(e.target.value)}
             placeholder="Reason (optional)"
-            className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
+            className="dashboard-field"
           />
           <button
             type="submit"
-            disabled={!canWithdraw}
+            disabled={!canWithdraw || lockHeldByOtherUser}
             className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {instantWithdrawals ? 'Withdraw Now' : 'Request Withdrawal'}
+            {instantWithdrawals ? `Withdraw ${formatPHP(selectedWithdrawAmount)}` : `Request ${formatPHP(selectedWithdrawAmount)}`}
           </button>
         </form>
+        <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs font-inter text-gray-700">
+          {withdrawDenominations.map((option) => {
+            const count = machineInventory?.[option.field] ?? 0
+            return (
+              <div key={option.field} className="dashboard-list-item px-3 py-2">
+                <p className="font-semibold text-gray-800">{option.label}</p>
+                <p>{inventoryLoading ? 'Loading inventory...' : `${count} available`}</p>
+              </div>
+            )
+          })}
+        </div>
+        <p className="text-sm text-gray-600 font-inter mt-2">
+          Selected payout: <span className="font-semibold text-blue-700">{formatPHP(selectedWithdrawAmount)}</span>
+        </p>
+        <div className="mt-4 rounded-2xl border border-white/80 bg-white/72 p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h4 className="text-lg font-sora font-bold text-blue-700">Cash Stock</h4>
+              <p className="text-xs text-gray-600 font-inter">What is currently loaded in the machine</p>
+            </div>
+            <div className="rounded-xl bg-white/80 px-4 py-2 border border-white shadow-sm">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-blue-600 font-inter font-semibold">Total value</p>
+              <p className="text-xl font-sora font-black text-blue-700">{formatPHP(machineInventoryTotalValue)}</p>
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {machineCashStock.map((item) => (
+              <div key={item.field} className="dashboard-list-item">
+                <p className="text-sm font-semibold text-gray-800">{item.label}</p>
+                <p className="text-xs text-gray-600 font-inter">{inventoryLoading ? 'Loading...' : `${item.count} in stock`}</p>
+              </div>
+            ))}
+          </div>
+        </div>
         {!instantWithdrawals && (
           <p className="text-sm text-amber-700 font-inter mt-2">Parent approval is required before this withdrawal is processed.</p>
         )}
-        {!canWithdraw && withdrawAmount !== '' && (
+        {!canWithdraw && !inventoryLoading && (
           <p className="text-sm text-red-600 font-inter mt-2">
-            Enter a valid amount not greater than your balance or daily limit, and add a note if required.
+            Pick a denomination that is in stock, keep the quantity valid, and make sure the total stays within your balance.
           </p>
         )}
       </div>
+      )}
 
-      <div className="grid lg:grid-cols-2 gap-6">
-        <div className="glass-card">
-          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Goal Highlight</h3>
-          <p className="text-gray-700 font-inter font-semibold">{topGoal ? topGoal.name : 'No goals yet'}</p>
-          <p className="text-sm text-gray-600 font-inter mt-1">Best progress so far</p>
-          <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-3">
-            <div
-              className="h-full bg-gradient-to-r from-blue-600 to-teal-500"
-              style={{ width: `${topGoal ? Math.round((topGoal.saved / topGoal.target) * 100) : 0}%` }}
-            ></div>
-          </div>
-          <p className="text-sm text-gray-700 font-inter mt-2">{topGoal ? `${formatPHP(topGoal.saved)} / ${formatPHP(topGoal.target)}` : 'Add your first goal in Goals'}</p>
+      {kidQuickSection === 'activity' && (
+      <div className="dashboard-panel">
+        <h3 className="text-lg sm:text-xl font-sora font-bold text-gray-900 mb-3">Recent Activity</h3>
+        <div className="space-y-2 font-inter text-gray-700 text-sm">
+          {kidHistory.slice(0, 5).map((item) => (
+            <div key={item.id} className="dashboard-list-item flex items-center justify-between px-3 py-2">
+              <div>
+                <p className="font-semibold text-gray-800">{item.note}</p>
+                <p className="text-xs text-gray-500">{item.when}</p>
+              </div>
+              <p className={`font-sora font-bold ${getSignedTransactionAmount(item) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {formatSignedPHP(getSignedTransactionAmount(item))}
+              </p>
+            </div>
+          ))}
+          {kidHistory.length === 0 && <p>No transactions yet.</p>}
         </div>
-
-        <div className="glass-card">
-          <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Quick View</h3>
-          <div className="space-y-2 font-inter text-gray-700">
-            <p>• Latest transaction: {kidHistory[0] ? `${kidHistory[0].note} (${formatSignedPHP(getSignedTransactionAmount(kidHistory[0]))})` : 'No transactions yet'}</p>
-            <p>• Pending approvals: {pendingForKid.length}</p>
-            <p>• Reminder notifications: {kidNotifications ? 'On' : 'Off'}</p>
-            <p>• Balance visibility: {kidShowBalance ? 'Visible' : 'Hidden'}</p>
-          </div>
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveMenu('settings')}
+              className="dashboard-action-soft px-3 py-2 rounded-xl"
+          >
+            Open Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => setKidQuickSection('none')}
+              className="dashboard-action-soft px-3 py-2 rounded-xl"
+          >
+            Hide
+          </button>
         </div>
       </div>
+      )}
     </section>
   )
 
@@ -1776,7 +2380,6 @@ export default function DashboardPage() {
           <div className="space-y-3 font-inter text-gray-700">
             <p>• Pending requests: <span className="font-semibold">{pendingForKid.length}</span></p>
             <p>• Approval completion rate: <span className="font-semibold">{kidApprovalRate}%</span></p>
-            <p>• Daily withdraw limit: <span className="font-semibold">{formatPHP(kidDailyWithdrawLimit)}</span></p>
             <p>• Current policy: <span className="font-semibold">{instantWithdrawals ? 'Instant mode' : 'Parent approval mode'}</span></p>
           </div>
         </div>
@@ -1786,14 +2389,14 @@ export default function DashboardPage() {
 
   const kidSettingsView = (
     <section className="space-y-6">
-      <div className="glass-card">
+      <div className="dashboard-panel">
         <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-3">Settings Locked</h3>
         <p className="font-inter text-gray-700">
           Only parents can access and change settings. If you need to update limits or permissions,
           ask a parent to open the Parent Settings page.
         </p>
       </div>
-      <div className="glass-card">
+      <div className="dashboard-panel">
         <p className="font-inter font-semibold text-gray-800">Current policy</p>
         <p className="text-sm text-gray-700 font-inter mt-1">
           {instantWithdrawals
@@ -1806,9 +2409,9 @@ export default function DashboardPage() {
 
   const kidProfileView = (
     <section className="space-y-6">
-      <div className="glass-card">
+      <div className="dashboard-panel">
         <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Profile</h3>
-        <div className="bg-white/70 rounded-xl p-4 font-inter">
+        <div className="dashboard-list-item font-inter">
           <div className="flex items-center gap-4 mb-4">
             <div className="text-5xl">{selectedCharacter.emoji}</div>
             <div className="flex-1">
@@ -1823,7 +2426,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="glass-card">
+      <div className="dashboard-panel">
         <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Choose Your Character</h4>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           {characterOptions.map((option) => (
@@ -1833,8 +2436,8 @@ export default function DashboardPage() {
               onClick={() => setKidCharacter(option.id)}
               className={`rounded-xl p-3 text-left transition-all border-2 ${
                 kidCharacter === option.id
-                  ? 'border-blue-500 bg-white shadow-md'
-                  : 'border-transparent bg-white/70 hover:bg-white'
+                  ? 'border-blue-400 bg-white shadow-md shadow-blue-100'
+                  : 'border-white bg-sky-50/75 hover:bg-white'
               }`}
             >
               <p className="text-3xl">{option.emoji}</p>
@@ -1862,164 +2465,225 @@ export default function DashboardPage() {
   )
 
   const parentDashboardView = (
-    <section className="space-y-6">
-      {validKidAccounts.length === 0 ? (
-        <div className="glass-card text-center py-8">
-          <div className="text-6xl mb-4">👶</div>
-          <h3 className="text-xl sm:text-2xl font-sora font-bold text-gray-700 mb-2">No Kid Accounts Yet</h3>
-          <p className="text-gray-600 font-inter mb-4">
-            Get started by creating kid accounts in Settings
-          </p>
-          <button
-            type="button"
-            onClick={() => setActiveMenu('settings')}
-            className="btn-primary inline-block"
-          >
-            Go to Settings
-          </button>
+    <section className="space-y-4 sm:space-y-6">
+      <div className="relative overflow-hidden rounded-2xl border-2 border-blue-200 bg-gradient-to-r from-blue-600 via-sky-500 to-teal-500 p-5 sm:p-6 shadow-lg">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(255,255,255,0.24),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.08),transparent)]" />
+        <div className="relative z-10 max-w-sm">
+        <p className="text-[11px] uppercase tracking-[0.22em] text-white/80 font-inter font-semibold">Parent Wallet</p>
+        <h2 className="text-4xl sm:text-5xl font-sora font-black text-white mt-2 drop-shadow-[0_6px_18px_rgba(11,49,96,0.34)]">{formatPHP(parentBalance)}</h2>
+        <p className="text-sm text-white/88 font-inter mt-3 leading-relaxed">Kids: {validKidAccounts.length} • Pending requests: {parentPending.length}</p>
         </div>
-      ) : (
-        <>
-          <div className="glass-card">
-            <h2 className="text-lg sm:text-2xl font-sora font-bold text-blue-700 mb-3">Quick Actions</h2>
-            {parentName && (
-              <div className="mb-4 rounded-xl bg-white/70 px-4 py-3 flex items-center justify-between">
-                <p className="font-inter font-semibold text-gray-800">Parent Wallet ({parentName})</p>
-                <p className="font-sora font-bold text-blue-700">{formatPHP(parentBalance)}</p>
-              </div>
-            )}
-            <div className="grid md:grid-cols-2 gap-4">
-              {parentDepositTargets.map((username) => (
-                <div key={username} className="bg-white/70 rounded-xl p-4">
-                  <p className="font-inter font-semibold text-gray-800 mb-2">
-                    {username === parentName ? 'Add Money to Parent Wallet' : `Add Money to ${username}`}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => startParentDepositFlow(username)}
-                    disabled={pendingDepositKid !== null}
-                    className="w-full px-4 py-2 rounded-lg bg-gradient-to-r from-green-600 to-green-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    💰 Deposit
-                  </button>
-                </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <button
+          type="button"
+          onClick={() => setParentQuickSection((prev) => prev === 'deposit' ? 'none' : 'deposit')}
+          className="dashboard-action-primary"
+        >
+          <span className="sm:hidden text-lg">💰</span>
+          <span className="hidden sm:inline">Deposit</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setParentQuickSection((prev) => prev === 'withdraw' ? 'none' : 'withdraw')}
+          className="dashboard-action-secondary"
+        >
+          <span className="sm:hidden text-lg">💸</span>
+          <span className="hidden sm:inline">Withdraw</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowParentMoreActions((prev) => !prev)}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">⋯</span>
+          <span className="hidden sm:inline">{showParentMoreActions ? 'Less' : 'More'}</span>
+        </button>
+      </div>
+
+      {showParentMoreActions && (
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <button
+          type="button"
+          onClick={() => setParentQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">🧾</span>
+          <span className="hidden sm:inline">Activity</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMenu('settings')}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">⚙️</span>
+          <span className="hidden sm:inline">Settings</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMenu('profile')}
+          className="dashboard-action-soft"
+        >
+          <span className="sm:hidden text-lg">👤</span>
+          <span className="hidden sm:inline">Profile</span>
+        </button>
+      </div>
+      )}
+
+      {parentQuickSection === 'deposit' && (
+      <div className="dashboard-panel">
+        <h3 className="text-lg sm:text-xl font-sora font-bold text-gray-900 mb-3">Choose Account to Deposit</h3>
+        {validKidAccounts.length === 0 && (
+          <p className="text-sm text-gray-600 font-inter mb-3">No kid accounts yet. Create one in Settings.</p>
+        )}
+        <div className="grid sm:grid-cols-2 gap-3">
+          {parentDepositTargets.map((username) => (
+            <button
+              key={username}
+              type="button"
+              onClick={() => startParentDepositFlow(username)}
+              disabled={pendingDepositKid !== null || lockHeldByOtherUser}
+              className="dashboard-list-item text-left font-inter font-semibold text-gray-800 disabled:opacity-50"
+            >
+              {username === parentName ? `Deposit to ${username} (Parent)` : `Deposit to ${username}`}
+            </button>
+          ))}
+        </div>
+      </div>
+      )}
+
+      {parentQuickSection === 'withdraw' && parentName && (
+      <div className="dashboard-panel space-y-4">
+        <h3 className="text-lg sm:text-xl font-sora font-bold text-gray-900">Withdraw Cash</h3>
+        <div>
+          <p className="font-inter font-semibold text-gray-800 mb-2">From Parent Wallet</p>
+          <form onSubmit={handleParentWithdraw} className="grid gap-2 sm:grid-cols-4">
+            <select
+              value={withdrawDenomination}
+              onChange={(e) => setWithdrawDenomination(e.target.value as WithdrawDenominationKey)}
+              className="dashboard-field"
+            >
+              {withdrawDenominations.map((option) => {
+                const count = machineInventory?.[option.field] ?? 0
+                return (
+                  <option key={option.field} value={option.field}>
+                    {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                  </option>
+                )
+              })}
+            </select>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={withdrawQuantity}
+              onChange={(e) => setWithdrawQuantity(e.target.value)}
+              placeholder="Qty"
+              className="dashboard-field"
+            />
+            <input
+              type="text"
+              value={parentWithdrawNote}
+              onChange={(e) => setParentWithdrawNote(e.target.value)}
+              placeholder="Reason"
+              className="dashboard-field"
+            />
+            <button
+              type="submit"
+              disabled={!canParentWithdraw || parentWithdrawBusy || lockHeldByOtherUser}
+              className="dashboard-action-secondary px-4 py-2 disabled:opacity-50"
+            >
+              {parentWithdrawBusy ? 'Processing...' : `Withdraw ${formatPHP(selectedWithdrawAmount)}`}
+            </button>
+          </form>
+        </div>
+
+        <div>
+          <p className="font-inter font-semibold text-gray-800 mb-2">From Child Balance</p>
+          <form onSubmit={handleParentChildWithdraw} className="grid gap-2 sm:grid-cols-5">
+            <select
+              value={parentChildWithdrawKid}
+              onChange={(e) => setParentChildWithdrawKid(e.target.value)}
+              className="dashboard-field"
+            >
+              {validKidAccounts.map((username) => (
+                <option key={username} value={username}>{username}</option>
               ))}
-              {parentName && (
-                <div className="bg-white/70 rounded-xl p-4 md:col-span-2 space-y-4">
-                  <div>
-                    <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Parent Wallet</p>
-                    <form onSubmit={handleParentWithdraw} className="grid gap-2 sm:grid-cols-3">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={parentWithdrawAmount}
-                        onChange={(e) => setParentWithdrawAmount(e.target.value)}
-                        placeholder="Amount"
-                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                      />
-                      <input
-                        type="text"
-                        value={parentWithdrawNote}
-                        onChange={(e) => setParentWithdrawNote(e.target.value)}
-                        placeholder="Reason (optional)"
-                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                      />
-                      <button
-                        type="submit"
-                        disabled={!canParentWithdraw || parentWithdrawBusy}
-                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-red-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {parentWithdrawBusy ? 'Processing...' : '💸 Withdraw'}
-                      </button>
-                    </form>
-                    {!canParentWithdraw && parentWithdrawAmount !== '' && (
-                      <p className="text-sm text-red-600 font-inter mt-2">
-                        Enter a valid amount not greater than your parent wallet balance.
-                      </p>
-                    )}
-                  </div>
+            </select>
+            <select
+              value={withdrawDenomination}
+              onChange={(e) => setWithdrawDenomination(e.target.value as WithdrawDenominationKey)}
+              className="dashboard-field"
+            >
+              {withdrawDenominations.map((option) => {
+                const count = machineInventory?.[option.field] ?? 0
+                return (
+                  <option key={option.field} value={option.field}>
+                    {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                  </option>
+                )
+              })}
+            </select>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={withdrawQuantity}
+              onChange={(e) => setWithdrawQuantity(e.target.value)}
+              placeholder="Qty"
+              className="dashboard-field"
+            />
+            <input
+              type="text"
+              value={parentChildWithdrawNote}
+              onChange={(e) => setParentChildWithdrawNote(e.target.value)}
+              placeholder="Reason"
+              className="dashboard-field"
+            />
+            <button
+              type="submit"
+              disabled={!canParentChildWithdraw || parentChildWithdrawBusy || lockHeldByOtherUser}
+              className="dashboard-action-secondary px-4 py-2 disabled:opacity-50"
+            >
+              {parentChildWithdrawBusy ? 'Processing...' : `Withdraw ${formatPHP(selectedWithdrawAmount)}`}
+            </button>
+          </form>
+        </div>
+      </div>
+      )}
 
-                  <div className="border-t border-white/60 pt-4">
-                    <p className="font-inter font-semibold text-gray-800 mb-2">Withdraw from Child Balance</p>
-                    <form onSubmit={handleParentChildWithdraw} className="grid gap-2 sm:grid-cols-4">
-                      <select
-                        value={parentChildWithdrawKid}
-                        onChange={(e) => setParentChildWithdrawKid(e.target.value)}
-                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                      >
-                        {validKidAccounts.map((username) => (
-                          <option key={username} value={username}>
-                            {username}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={parentChildWithdrawAmount}
-                        onChange={(e) => setParentChildWithdrawAmount(e.target.value)}
-                        placeholder="Amount"
-                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                      />
-                      <input
-                        type="text"
-                        value={parentChildWithdrawNote}
-                        onChange={(e) => setParentChildWithdrawNote(e.target.value)}
-                        placeholder="Reason (optional)"
-                        className="px-3 py-2 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80 text-sm"
-                      />
-                      <button
-                        type="submit"
-                        disabled={!canParentChildWithdraw || parentChildWithdrawBusy}
-                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-sky-500 text-white font-inter font-semibold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {parentChildWithdrawBusy ? 'Processing...' : '🧒 Withdraw'}
-                      </button>
-                    </form>
-                    <p className="text-xs text-gray-600 font-inter mt-2">
-                      Available from {parentChildWithdrawKid || 'selected child'}: {formatPHP(selectedChildBalance)}
-                    </p>
-                    {!canParentChildWithdraw && parentChildWithdrawAmount !== '' && (
-                      <p className="text-sm text-red-600 font-inter mt-2">
-                        Enter a valid amount not greater than the selected child balance.
-                      </p>
-                    )}
-                  </div>
+      {parentQuickSection === 'activity' && (
+      <div className="grid lg:grid-cols-2 gap-4">
+        <div className="dashboard-panel">
+          <h3 className="text-lg font-sora font-bold text-gray-900 mb-2">Pending Requests</h3>
+          <div className="space-y-2">
+            {parentPending.slice(0, 6).map((item) => (
+              <div key={item.id} className="dashboard-list-item px-3 py-2">
+                <p className="font-inter font-semibold text-gray-800">{item.child} • {formatPHP(item.amount)}</p>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" onClick={() => approvePending(item.id)} className="dashboard-action-secondary px-3 py-1 text-sm rounded-xl">Approve</button>
+                  <button type="button" onClick={() => declinePending(item.id)} className="dashboard-action-soft px-3 py-1 text-sm rounded-xl">Decline</button>
                 </div>
-              )}
-            </div>
-          </div>
-
-          <div className="grid lg:grid-cols-2 gap-6">
-            <div className="glass-card">
-              <h2 className="text-lg sm:text-2xl font-sora font-bold text-blue-700 mb-3">All Kids Balances</h2>
-              <div className="space-y-3">
-                {parentChildren.map((child) => (
-                  <div key={child.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
-                    <div>
-                      <p className="font-inter font-semibold text-gray-800">{child.name}</p>
-                      <p className="text-xs text-gray-600 font-inter">{child.withdrawalsThisWeek} withdrawals logged</p>
-                    </div>
-                    <p className="font-sora font-bold text-blue-700">{formatPHP(child.balance)}</p>
-                  </div>
-                ))}
               </div>
-            </div>
-
-            <div className="glass-card">
-              <h2 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Alerts</h2>
-              <div className="space-y-3">
-                {parentAlerts.map((alert, index) => (
-                  <div key={index} className="bg-white/70 rounded-xl px-4 py-3">
-                    <p className="font-inter font-semibold text-gray-800">⚠️ {alert}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
+            ))}
+            {parentPending.length === 0 && <p className="text-sm text-gray-600 font-inter">No pending requests.</p>}
           </div>
-        </>
+        </div>
+
+        <div className="dashboard-panel">
+          <h3 className="text-lg font-sora font-bold text-gray-900 mb-2">Kid Balances</h3>
+          <div className="space-y-2">
+            {parentChildren.map((child) => (
+              <div key={child.id} className="dashboard-list-item flex items-center justify-between px-3 py-2">
+                <p className="font-inter font-semibold text-gray-800">{child.name}</p>
+                <p className="font-sora font-bold text-gray-900">{formatPHP(child.balance)}</p>
+              </div>
+            ))}
+            {parentChildren.length === 0 && <p className="text-sm text-gray-600 font-inter">No kid accounts yet.</p>}
+          </div>
+        </div>
+      </div>
       )}
     </section>
   )
@@ -2064,6 +2728,7 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => approvePending(item.id)}
+                    disabled={lockHeldByOtherUser}
                     className="px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-teal-500 text-white font-inter font-semibold"
                   >
                     Approve
@@ -2189,7 +2854,6 @@ export default function DashboardPage() {
           <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Policy Snapshot</h3>
           <div className="space-y-2 font-inter text-gray-700">
             <p>• Instant withdrawals: <span className="font-semibold">{instantWithdrawals ? 'Enabled' : 'Disabled'}</span></p>
-            <p>• Kid daily limit: <span className="font-semibold">{formatPHP(kidDailyWithdrawLimit)}</span></p>
             <p>• Auto-approve limit: <span className="font-semibold">{formatPHP(parentAutoApproveLimit)}</span></p>
             <p>• Spending alerts: <span className="font-semibold">{parentSpendingAlerts ? 'On' : 'Off'}</span></p>
           </div>
@@ -2211,10 +2875,10 @@ export default function DashboardPage() {
 
   const parentSettingsView = (
     <section className="space-y-6">
-      <div className="glass-card space-y-5">
+      <div className="dashboard-panel space-y-5">
         <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Parent Settings</h3>
 
-        <div className="bg-white/70 rounded-xl p-4 space-y-3">
+        <div className="dashboard-list-item space-y-3">
           <div>
             <p className="font-inter font-semibold text-gray-800">📶 Device WiFi</p>
             <p className="text-sm text-gray-600 font-inter">
@@ -2231,7 +2895,7 @@ export default function DashboardPage() {
               value={wifiSsid}
               onChange={(e) => setWifiSsid(e.target.value)}
               maxLength={32}
-              className="px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+              className="dashboard-field"
             />
             <input
               type="password"
@@ -2239,7 +2903,7 @@ export default function DashboardPage() {
               value={wifiPass}
               onChange={(e) => setWifiPass(e.target.value)}
               maxLength={63}
-              className="px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+              className="dashboard-field"
             />
           </div>
           <div className="flex items-center gap-3">
@@ -2276,7 +2940,7 @@ export default function DashboardPage() {
                   setWifiSaving(false)
                 }
               }}
-              className="px-4 py-2 rounded-lg font-sora font-semibold transition-all bg-gradient-to-r from-blue-600 to-teal-500 text-white disabled:opacity-50"
+              className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
             >
               {wifiSaving ? 'Sending…' : 'Send to Device'}
             </button>
@@ -2288,7 +2952,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="bg-white/70 rounded-xl p-4 flex items-center justify-between gap-4">
+        <div className="dashboard-list-item flex items-center justify-between gap-4">
           <div>
             <p className="font-inter font-semibold text-gray-800">Allow immediate kid withdrawals</p>
             <p className="text-sm text-gray-600 font-inter">
@@ -2300,15 +2964,15 @@ export default function DashboardPage() {
             onClick={() => setInstantWithdrawals((prev) => !prev)}
             className={`px-4 py-2 rounded-lg font-sora font-semibold transition-all ${
               instantWithdrawals
-                ? 'bg-gradient-to-r from-blue-600 to-teal-500 text-white'
-                : 'bg-white text-gray-700 border border-gray-300'
+                ? 'bg-gradient-to-r from-blue-600 via-sky-500 to-cyan-400 text-white shadow-md'
+                : 'bg-white text-gray-700 border border-gray-300 shadow-sm'
             }`}
           >
             {instantWithdrawals ? 'Enabled' : 'Disabled'}
           </button>
         </div>
 
-        <div className="bg-white/70 rounded-xl p-4 flex items-center justify-between gap-4">
+        <div className="dashboard-list-item flex items-center justify-between gap-4">
           <div>
             <p className="font-inter font-semibold text-gray-800">Spending alerts</p>
             <p className="text-sm text-gray-600 font-inter">Show alerts for kid withdrawal activity and thresholds.</p>
@@ -2318,28 +2982,15 @@ export default function DashboardPage() {
             onClick={() => setParentSpendingAlerts((prev) => !prev)}
             className={`px-4 py-2 rounded-lg font-sora font-semibold transition-all ${
               parentSpendingAlerts
-                ? 'bg-gradient-to-r from-blue-600 to-teal-500 text-white'
-                : 'bg-white text-gray-700 border border-gray-300'
+                ? 'bg-gradient-to-r from-blue-600 via-sky-500 to-cyan-400 text-white shadow-md'
+                : 'bg-white text-gray-700 border border-gray-300 shadow-sm'
             }`}
           >
             {parentSpendingAlerts ? 'On' : 'Off'}
           </button>
         </div>
 
-        <div className="bg-white/70 rounded-xl p-4">
-          <p className="font-inter font-semibold text-gray-800 mb-2">Kid daily withdraw limit (PHP)</p>
-          <div className="flex items-center gap-3 mb-4">
-            <input
-              type="number"
-              min="1"
-              step="1"
-              value={kidDailyWithdrawLimit}
-              onChange={(e) => setKidDailyWithdrawLimit(Math.max(1, Number(e.target.value) || 1))}
-              className="w-32 px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
-            />
-            <p className="text-sm text-gray-600 font-inter">Maximum request amount allowed for kids.</p>
-          </div>
-
+        <div className="dashboard-list-item">
           <p className="font-inter font-semibold text-gray-800 mb-2">Auto-approve limit (PHP)</p>
           <div className="flex items-center gap-3">
             <input
@@ -2348,7 +2999,7 @@ export default function DashboardPage() {
               step="0.01"
               value={parentAutoApproveLimit}
               onChange={(e) => setParentAutoApproveLimit(Math.max(0, Number(e.target.value) || 0))}
-              className="w-32 px-3 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+              className="dashboard-field w-32"
             />
             <p className="text-sm text-gray-600 font-inter">
               Requests at or below this amount are auto-approved when instant mode is off.
@@ -2358,7 +3009,7 @@ export default function DashboardPage() {
 
         <div className="border-t border-blue-200 pt-6">
           <h4 className="text-lg font-sora font-bold text-blue-700 mb-3">👶 Create Kid Accounts</h4>
-          <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 mb-4">
+          <div className="rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-cyan-50 p-4 mb-4 shadow-sm">
             <p className="text-sm text-blue-800 font-inter mb-4">
               Create accounts for your children. They will use these credentials to log in and access their savings dashboard.
             </p>
@@ -2368,26 +3019,26 @@ export default function DashboardPage() {
                 value={newKidUsername}
                 onChange={(e) => setNewKidUsername(e.target.value)}
                 placeholder="Kid username (e.g., Sarah, Tommy)"
-                className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                className="dashboard-field w-full px-4 py-2"
               />
               <input
                 type="password"
                 value={newKidPassword}
                 onChange={(e) => setNewKidPassword(e.target.value)}
                 placeholder="Create a password for them"
-                className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                className="dashboard-field w-full px-4 py-2"
               />
               <input
                 type="text"
                 value={newKidSecurityQuestion === 'Custom question' ? newKidCustomQuestion : ''}
                 onChange={(e) => setNewKidCustomQuestion(e.target.value)}
                 placeholder="Your custom security question"
-                className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                className="dashboard-field w-full px-4 py-2"
               />
               <select
                 value={newKidSecurityQuestion}
                 onChange={(e) => setNewKidSecurityQuestion(e.target.value)}
-                className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                className="dashboard-field w-full px-4 py-2"
               >
                 <option value="What is your favorite pet?">What is your favorite pet?</option>
                 <option value="What is your favorite color?">What is your favorite color?</option>
@@ -2402,7 +3053,7 @@ export default function DashboardPage() {
                   value={newKidCustomQuestion}
                   onChange={(e) => setNewKidCustomQuestion(e.target.value)}
                   placeholder="Your custom security question"
-                  className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                  className="dashboard-field w-full px-4 py-2"
                 />
               )}
               <input
@@ -2410,7 +3061,7 @@ export default function DashboardPage() {
                 value={newKidSecurityAnswer}
                 onChange={(e) => setNewKidSecurityAnswer(e.target.value)}
                 placeholder="🔐 Answer to security question"
-                className="w-full px-4 py-2 rounded-lg border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter"
+                className="dashboard-field w-full px-4 py-2"
               />
               <button
                 type="button"
@@ -2438,6 +3089,7 @@ export default function DashboardPage() {
                       password: newKidPassword,
                       securityQuestion: finalQuestion,
                       securityAnswer: newKidSecurityAnswer.trim().toLowerCase(),
+                      parentUsername: parentName,
                     }),
                   })
                   if (!res.ok) {
@@ -2446,7 +3098,7 @@ export default function DashboardPage() {
                     return
                   }
 
-                  const kidsRes = await fetch('/api/auth/kids', { cache: 'no-store' })
+                  const kidsRes = await fetch(`/api/auth/kids?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' })
                   if (kidsRes.ok) {
                     const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
                     setValidKidAccounts(kidsData.kids.map((kid) => kid.username))
@@ -2466,7 +3118,7 @@ export default function DashboardPage() {
                   setNewKidCustomQuestion('')
                   alert(`✅ Kid account "${username}" created successfully in database!`)
                 }}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-sora font-semibold py-2 px-4 rounded-lg transition-all"
+                className="dashboard-action-primary w-full py-2 px-4"
               >
                 ➕ Create Kid Account
               </button>
@@ -2474,11 +3126,11 @@ export default function DashboardPage() {
           </div>
 
           {validKidAccounts.length > 0 && (
-            <div className="bg-white/70 rounded-xl p-4">
+            <div className="dashboard-list-item p-4">
               <p className="font-inter font-semibold text-gray-800 mb-3">Active Kid Accounts:</p>
               <div className="space-y-2">
                 {validKidAccounts.map((username) => (
-                  <div key={username} className="flex items-center justify-between bg-white rounded-lg p-3 border border-gray-200">
+                  <div key={username} className="flex items-center justify-between bg-white rounded-lg p-3 border border-sky-100 shadow-sm">
                     <div className="flex-1">
                       <p className="font-inter font-bold text-gray-800">👶 {username}</p>
                       <p className="text-sm text-gray-600 font-inter">Balance: {formatPHP(kidBalances[username] || 0)}</p>
@@ -2487,7 +3139,7 @@ export default function DashboardPage() {
                       type="button"
                       onClick={async () => {
                         if (window.confirm(`Delete kid account "${username}"? This cannot be undone.`)) {
-                          const res = await fetch(`/api/auth/kids?username=${encodeURIComponent(username)}`, {
+                          const res = await fetch(`/api/auth/kids?username=${encodeURIComponent(username)}&parent=${encodeURIComponent(parentName)}`, {
                             method: 'DELETE',
                           })
                           if (!res.ok) {
@@ -2496,7 +3148,7 @@ export default function DashboardPage() {
                             return
                           }
 
-                          const kidsRes = await fetch('/api/auth/kids', { cache: 'no-store' })
+                          const kidsRes = await fetch(`/api/auth/kids?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' })
                           if (kidsRes.ok) {
                             const kidsData = await kidsRes.json() as { kids: Array<{ username: string; balance: number }> }
                             setValidKidAccounts(kidsData.kids.map((kid) => kid.username))
@@ -2521,50 +3173,14 @@ export default function DashboardPage() {
           )}
         </div>
 
-        <div className="border-t border-red-200 pt-6">
-          <h4 className="text-lg font-sora font-bold text-red-600 mb-3">⚠️ Danger Zone</h4>
-          <div className="bg-red-50 border-2 border-red-200 rounded-xl p-4">
-            <p className="font-inter font-semibold text-gray-800 mb-3">Clear all accounts and data</p>
-            <p className="text-sm text-gray-700 font-inter mb-4">
-              This will permanently delete all accounts, balances, goals, transactions, and app data. This action cannot be undone.
-            </p>
-            <button
-              type="button"
-              onClick={async () => {
-                if (window.confirm('Are you absolutely sure? This will delete ALL data including all accounts, balances, goals, and transactions. This cannot be undone.')) {
-                  const res = await fetch('/api/admin/reset', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ confirm: 'RESET_ALL_DATA' }),
-                  })
-                  if (!res.ok) {
-                    const data = await res.json().catch(() => ({ error: 'Failed to reset data' }))
-                    alert(`❌ ${data.error ?? 'Failed to reset data'}`)
-                    return
-                  }
-
-                  Object.values(STORAGE_KEYS).forEach((key) => {
-                    localStorage.removeItem(key)
-                  })
-                  sessionStorage.clear()
-                  alert('✅ All accounts, balances, inventory, and transactions were reset.')
-                  router.push('/')
-                }
-              }}
-              className="w-full bg-red-600 hover:bg-red-700 text-white font-sora font-semibold py-3 px-4 rounded-lg transition-all transform hover:scale-105 active:scale-95"
-            >
-              🗑️ Clear All Data
-            </button>
-          </div>
-        </div>
       </div>
     </section>
   )
 
   const parentProfileView = (
-    <section className="glass-card space-y-4">
+    <section className="dashboard-panel space-y-4">
       <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Profile</h3>
-      <div className="bg-white/70 rounded-xl p-4 font-inter">
+      <div className="dashboard-list-item font-inter">
         <p><span className="font-semibold">Name:</span> Parent Account</p>
         <p><span className="font-semibold">Role:</span> Parent</p>
         <p><span className="font-semibold">Permissions:</span> View balances, approve withdrawals, manage settings</p>
@@ -2574,97 +3190,163 @@ export default function DashboardPage() {
 
   const kidContent: Record<MenuKey, JSX.Element> = {
     dashboard: kidDashboardView,
-    goals: kidGoalsView,
-    transactions: kidTransactionsView,
-    statistics: kidStatisticsView,
+    transactions: (
+      <section className="space-y-6">
+        {kidTransactionsView}
+        {kidStatisticsView}
+      </section>
+    ),
     settings: kidSettingsView,
     profile: kidProfileView,
   }
 
   const parentContent: Record<MenuKey, JSX.Element> = {
     dashboard: parentDashboardView,
-    goals: parentGoalsView,
-    transactions: parentTransactionsView,
-    statistics: parentStatisticsView,
+    transactions: (
+      <section className="space-y-6">
+        {parentTransactionsView}
+        {parentStatisticsView}
+      </section>
+    ),
     settings: parentSettingsView,
     profile: parentProfileView,
   }
 
   return (
     <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-blue-500 via-teal-400 to-cyan-300">
-      <div className="absolute inset-0">
+      <div className="pointer-events-none absolute inset-0">
+        <div
+          className="absolute inset-0 opacity-35"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 12% 18%, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 36%), radial-gradient(circle at 85% 14%, rgba(173,255,252,0.45) 0%, rgba(173,255,252,0) 34%), radial-gradient(circle at 58% 82%, rgba(29,174,214,0.40) 0%, rgba(29,174,214,0) 40%)',
+          }}
+        />
         <div className="absolute top-20 left-10 w-72 h-72 bg-blue-400 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float"></div>
         <div className="absolute top-40 right-20 w-96 h-96 bg-cyan-300 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float" style={{ animationDelay: '0.4s' }}></div>
+        <div className="absolute -bottom-8 left-1/3 w-80 h-80 bg-teal-400 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float" style={{ animationDelay: '0.8s' }}></div>
+        <div className="absolute top-1/4 left-1/4 text-6xl opacity-20 animate-bounce-slow">💰</div>
+        <div className="absolute bottom-1/4 right-1/3 text-5xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.35s' }}>🪙</div>
+        <div className="absolute top-[62%] left-[18%] text-4xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.65s' }}>💵</div>
       </div>
 
-      <div className="relative z-10 min-h-screen flex">
-        <aside className="w-72 bg-white/25 backdrop-blur-xl border-r border-white/30 p-5 hidden md:flex md:flex-col">
-          <div className="mb-6">
-            <h1 className="text-3xl font-sora font-black text-white drop-shadow-lg">C.A.S.H.</h1>
-            <p className="text-white/85 font-inter text-sm">Learn • Save • Achieve</p>
+      <div className="relative z-10 min-h-screen flex items-center justify-center p-3 sm:p-4 md:p-6">
+        <div className="w-full max-w-[1240px] rounded-3xl border border-white/60 bg-white/14 backdrop-blur-md shadow-[0_24px_70px_rgba(8,41,82,0.24)] lg:flex">
+        <aside className="relative hidden lg:flex lg:flex-col w-72 m-3 mr-0 rounded-2xl border-2 border-blue-200 bg-white/92 shadow-[0_16px_34px_rgba(16,60,102,0.2)] overflow-hidden">
+          <div className="pointer-events-none absolute inset-0">
+            <div className="absolute -top-10 -left-8 h-44 w-44 rounded-full bg-blue-100/55 blur-2xl" />
+            <div className="absolute bottom-0 right-0 h-40 w-40 rounded-full bg-teal-100/55 blur-2xl" />
+            <div className="absolute inset-0 bg-gradient-to-b from-white/85 via-white/72 to-white/66" />
           </div>
 
-          <div className="p-3 bg-white/60 rounded-xl mb-6">
-            <p className="text-sm font-inter font-semibold text-gray-700">
-              View: <span className="font-sora text-blue-700">{role === 'kid' ? 'Kid' : 'Parent'}</span>
-            </p>
-          </div>
-
-          <nav className="space-y-2">
-            {visibleMenuItems.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => setActiveMenu(item.key)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left font-inter font-semibold transition-all ${
-                  activeMenu === item.key
-                    ? 'bg-white text-blue-700 shadow-md'
-                    : 'text-white hover:bg-white/20'
-                }`}
-              >
-                <span>{item.icon}</span>
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="mt-auto">
-            <Link
-              href="/login"
-              className="block w-full text-center bg-white text-blue-700 font-sora font-semibold py-3 rounded-xl hover:bg-blue-50 transition-colors"
-            >
-              Logout
-            </Link>
-          </div>
-        </aside>
-
-        <main className="flex-1 p-3 sm:p-4 md:p-8">
-          <div className="md:hidden mb-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h1 className="text-2xl sm:text-3xl font-sora font-black text-white drop-shadow-lg">C.A.S.H.</h1>
-              <span className="bg-white/80 text-blue-700 px-3 py-2 rounded-xl font-sora font-semibold text-xs sm:text-sm">
-                {role === 'kid' ? 'Kid View' : 'Parent View'}
-              </span>
+          <div className="relative z-10 flex h-full flex-col p-5">
+            <div className="mb-6 rounded-2xl border-2 border-blue-200 bg-white p-3 shadow-sm">
+              <h1 className="text-4xl font-sora font-black leading-none tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-700 via-sky-600 to-teal-500 drop-shadow-[0_2px_6px_rgba(17,83,145,0.2)]">
+                C.A.S.H.
+              </h1>
+              <p className="mt-2 text-[13px] text-slate-700/95 font-inter font-semibold tracking-wide">Learn • Save • Achieve</p>
             </div>
-            <div className="flex gap-1">
+
+            <div className="mb-6 rounded-2xl border-2 border-blue-200 bg-white/80 p-3.5 shadow-sm">
+              <p className="text-xs font-inter font-semibold text-slate-700/95 tracking-wide">
+                View: <span className="font-sora text-blue-800">{role === 'kid' ? 'Kid' : 'Parent'}</span>
+              </p>
+            </div>
+
+            <nav className="space-y-2">
               {visibleMenuItems.map((item) => (
                 <button
                   key={item.key}
                   type="button"
                   onClick={() => setActiveMenu(item.key)}
-                  className={`flex-1 flex flex-col items-center py-2 px-1 rounded-lg font-inter font-semibold transition-all ${
-                    activeMenu === item.key ? 'bg-white text-blue-700' : 'bg-white/40 text-white'
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left font-inter text-sm font-semibold transition-all duration-200 ${
+                    activeMenu === item.key
+                      ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white border border-cyan-200 shadow-[0_10px_24px_rgba(10,82,152,0.28)]'
+                      : 'text-slate-700 bg-white/75 hover:bg-white hover:text-slate-900 border-2 border-blue-200'
                   }`}
                 >
-                  <span className="text-xl">{item.icon}</span>
-                  <span className="text-[10px] mt-0.5 leading-tight">{item.label}</span>
+                  <span
+                    className={`grid h-7 w-7 place-items-center rounded-full border text-[12px] leading-none ${
+                      activeMenu === item.key
+                        ? 'bg-white text-blue-700 border-blue-100'
+                        : 'bg-white text-slate-700 border-sky-200'
+                    }`}
+                  >
+                    {item.icon}
+                  </span>
+                  <span className="tracking-wide">{item.label}</span>
                 </button>
               ))}
+            </nav>
+
+            <div className="mt-auto pt-5">
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="block w-full text-center rounded-xl bg-gradient-to-r from-blue-600 via-cyan-500 to-teal-400 text-white font-sora text-sm font-semibold py-2.5 shadow-[0_12px_28px_rgba(11,95,174,0.38)] hover:shadow-[0_16px_34px_rgba(11,95,174,0.44)] hover:brightness-110 transition-all"
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        <main className="flex-1 p-3 sm:p-4 md:p-5 lg:p-6">
+          <div className="relative rounded-2xl border-2 border-blue-200 bg-white/88 shadow-[0_20px_44px_rgba(14,30,64,0.16)] p-3 sm:p-4 md:p-6">
+            <div className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-b from-white/82 via-white/58 to-white/30" />
+            <div className="relative z-10">
+          <div className={`mb-4 rounded-2xl border px-4 py-3 shadow-[0_12px_26px_rgba(11,56,95,0.16)] ${deviceUsableForCurrentUser ? 'bg-gradient-to-r from-emerald-200/90 via-cyan-200/85 to-teal-200/85 border-emerald-300/85' : 'bg-gradient-to-r from-rose-200/92 via-orange-200/88 to-amber-200/88 border-rose-300/85'}`}>
+            <p className={`font-sora font-bold ${deviceUsableForCurrentUser ? 'text-emerald-900' : 'text-rose-900'}`}>
+              Device: {deviceUsableForCurrentUser ? 'Usable' : 'Not Usable'}
+            </p>
+            <p className={`text-xs font-inter mt-1 ${deviceUsableForCurrentUser ? 'text-emerald-900/85' : 'text-rose-900/85'}`}>
+              {deviceUsableForCurrentUser
+                ? 'You can start deposit or withdrawal.'
+                : `Currently in use by ${deviceLockStatus.holder ?? 'another user'} (${deviceLockStatus.mode ?? 'operation'}).`}
+            </p>
+          </div>
+
+          <div className="lg:hidden mb-4">
+            <div className="rounded-2xl border-2 border-blue-200 bg-white/88 p-3 shadow-[0_12px_28px_rgba(14,30,64,0.12)]">
+              <div className="flex items-center justify-between">
+                <h1 className="text-2xl sm:text-3xl font-sora font-black text-slate-900">C.A.S.H.</h1>
+                <span className="bg-white text-slate-900 px-3 py-2 rounded-xl font-sora font-semibold text-xs sm:text-sm border border-white shadow-sm">
+                  {role === 'kid' ? 'Kid View' : 'Parent View'}
+                </span>
+              </div>
+              <p className="mt-1 mb-3 text-[11px] font-inter font-semibold text-slate-700/90 tracking-wide">Learn • Save • Achieve</p>
+
+              <div className="flex gap-1.5">
+              {visibleMenuItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setActiveMenu(item.key)}
+                  className={`flex-1 flex flex-col items-center py-2 px-1.5 rounded-xl font-inter font-semibold transition-all ${
+                    activeMenu === item.key
+                      ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white border border-cyan-200 shadow-[0_10px_20px_rgba(10,82,152,0.35)]'
+                      : 'bg-white/80 text-slate-800 border-2 border-blue-200'
+                  }`}
+                >
+                  <span className={`grid h-6 w-6 place-items-center rounded-full border text-[11px] ${
+                    activeMenu === item.key
+                      ? 'border-white bg-white text-blue-700'
+                      : 'border-slate-300 bg-white text-slate-700'
+                  }`}>
+                    {item.icon}
+                  </span>
+                  <span className="text-[10px] mt-1 leading-tight tracking-wide">{item.label}</span>
+                </button>
+              ))}
+              </div>
             </div>
           </div>
 
           {role === 'kid' ? kidContent[activeMenu] : parentContent[activeMenu]}
+            </div>
+          </div>
         </main>
+        </div>
       </div>
 
       {/* Puppy widget removed */}
@@ -2694,6 +3376,9 @@ export default function DashboardPage() {
                 <p>Collected so far: <span className="font-semibold text-green-700">{formatPHP(pendingDepositReceived)}</span></p>
                 <p>Current Balance: <span className="font-semibold">{formatPHP(balance)}</span></p>
                 {pendingDepositError && <p className="text-amber-700 text-sm">{pendingDepositError}</p>}
+                <p className="text-[11px] text-gray-500">
+                  Debug: since={depositDebug.kidSince}, eventsSince={depositDebug.kidEventSince}, batch={depositDebug.lastBatchCount}, eventBatch={depositDebug.lastEventBatchCount}, maxId={depositDebug.lastBatchMaxId}, eventMaxId={depositDebug.lastEventMaxId}, last={formatPHP(depositDebug.lastBatchAmount)} @ {depositDebug.lastPollAt || '--:--:--'}
+                </p>
               </div>
 
               <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
@@ -2713,6 +3398,10 @@ export default function DashboardPage() {
               <button
                 type="button"
                 onClick={() => {
+                  if (pendingDepositReceived > 0) {
+                    setDepositCountdown(0)
+                    return
+                  }
                   setPendingDepositReceived(0)
                   setPendingDepositError(null)
                   setKidDepositModalOpen(false)
@@ -2796,6 +3485,9 @@ export default function DashboardPage() {
             <div className="bg-blue-50 rounded-xl p-4 space-y-2 font-inter text-gray-800">
               <p>Collected so far: <span className="font-semibold text-blue-700">{formatPHP(pendingDepositReceived)}</span></p>
               {pendingDepositError && <p className="text-amber-700 text-sm">{pendingDepositError}</p>}
+              <p className="text-[11px] text-gray-500">
+                Debug: since={depositDebug.parentSince}, eventsSince={depositDebug.parentEventSince}, batch={depositDebug.lastBatchCount}, eventBatch={depositDebug.lastEventBatchCount}, maxId={depositDebug.lastBatchMaxId}, eventMaxId={depositDebug.lastEventMaxId}, last={formatPHP(depositDebug.lastBatchAmount)} @ {depositDebug.lastPollAt || '--:--:--'}
+              </p>
             </div>
 
             <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
@@ -2814,7 +3506,13 @@ export default function DashboardPage() {
               </button>
               <button
                 type="button"
-                onClick={cancelParentDepositFlow}
+                onClick={() => {
+                  if (pendingDepositReceived > 0) {
+                    void applyParentReceivedDeposit()
+                    return
+                  }
+                  cancelParentDepositFlow()
+                }}
                 className="flex-1 rounded-xl bg-gray-200 text-gray-800 px-4 py-2 font-inter font-semibold"
               >
                 Cancel

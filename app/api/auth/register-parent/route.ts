@@ -4,11 +4,11 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { hashPassword } from '@/lib/password'
 
-// Single-tenant lockdown. Public registration is disabled by default.
-// Set REGISTRATION_ENABLED="true" at deploy time to re-open it.
-// Even when enabled, only usernames in ALLOWED_USERNAMES may register.
-const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED === 'true'
-const ALLOWED_USERNAMES = (process.env.ALLOWED_USERNAMES ?? 'matt,james')
+// Registration is enabled by default.
+// Set REGISTRATION_ENABLED="false" at deploy time to disable it.
+// Optional: set ALLOWED_USERNAMES (comma-separated) to restrict signups.
+const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED !== 'false'
+const ALLOWED_USERNAMES = (process.env.ALLOWED_USERNAMES ?? '')
   .split(',')
   .map((u) => u.trim().toLowerCase())
   .filter(Boolean)
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  if (!ALLOWED_USERNAMES.includes(username)) {
+  if (ALLOWED_USERNAMES.length > 0 && !ALLOWED_USERNAMES.includes(username)) {
     return NextResponse.json({ error: 'Username not permitted' }, { status: 403 })
   }
 
