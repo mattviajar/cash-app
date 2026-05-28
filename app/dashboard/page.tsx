@@ -23,6 +23,8 @@ type PendingWithdrawal = {
   child: string
   amount: number
   note: string
+  denomination?: WithdrawDenominationKey | null
+  quantity?: number | null
   createdAt: string
 }
 
@@ -1599,7 +1601,13 @@ export default function DashboardPage() {
         const createRes = await fetch('/api/pending-withdrawals', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ child: kidName, amount, note }),
+          body: JSON.stringify({
+            child: kidName,
+            amount,
+            note,
+            denomination: selectedWithdrawDenomination.field,
+            quantity: selectedWithdrawCount,
+          }),
         })
         if (!createRes.ok) {
           const data = await createRes.json().catch(() => ({ error: 'Failed to create withdrawal request' }))
@@ -1915,6 +1923,8 @@ export default function DashboardPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         command: `WITHDRAW ${Math.round(request.amount)}`,
+        denomination: request.denomination,
+        quantity: request.quantity,
         account: request.child,
         lockOwner: locker,
         parentUsername: parentName || locker,

@@ -4,6 +4,56 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { getOwnedKidUsernames, getParentUsernameFromRequest, isKidOwnedByParent } from '@/lib/parent-ownership'
 
+const DENOMINATION_FIELDS = new Set([
+  'bill20',
+  'bill50',
+  'bill100',
+  'bill500',
+  'bill1000',
+  'coin1',
+  'coin5',
+  'coin10',
+  'coin20',
+])
+
+const NOTE_META_PATTERN = /\s*\[denom:([a-z0-9]+);qty:(\d+)\]\s*$/i
+
+function parseDenomination(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const field = value.trim().toLowerCase()
+  if (!DENOMINATION_FIELDS.has(field)) return null
+  return field
+}
+
+function parseQuantity(value: unknown): number | null {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
+  const count = Math.round(parsed)
+  return count > 0 ? count : null
+}
+
+function appendNoteMeta(note: string, denomination: string | null, quantity: number | null): string {
+  if (!denomination || !quantity) return note
+  return `${note} [denom:${denomination};qty:${quantity}]`
+}
+
+function splitNoteMeta(note: string): { note: string; denomination: string | null; quantity: number | null } {
+  const match = note.match(NOTE_META_PATTERN)
+  if (!match) {
+    return { note, denomination: null, quantity: null }
+  }
+
+  const denomination = parseDenomination(match[1])
+  const quantity = parseQuantity(match[2])
+  const cleanNote = note.replace(NOTE_META_PATTERN, '').trim()
+
+  return {
+    note: cleanNote || 'Withdrawal request',
+    denomination,
+    quantity,
+  }
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const child = (searchParams.get('child') ?? '').trim().toLowerCase()
@@ -28,10 +78,10 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     pending: rows.map((row) => ({
+      ...splitNoteMeta(row.note),
       id: row.id,
       child: row.child,
       amount: row.amount,
-      note: row.note,
       createdAt: row.createdAt.toISOString(),
     })),
   })
@@ -53,6 +103,8 @@ export async function POST(request: Request) {
       : getParentUsernameFromRequest(request)
   const note = typeof payload.note === 'string' ? payload.note.trim() : 'Withdrawal request'
   const amount = Number(payload.amount)
+  const denomination = parseDenomination(payload.denomination)
+  const quantity = parseQuantity(payload.quantity)
 
   if (!child || !Number.isFinite(amount) || amount <= 0) {
     return NextResponse.json({ error: 'Invalid child or amount' }, { status: 400 })
@@ -74,9 +126,11 @@ export async function POST(request: Request) {
     data: {
       child,
       amount: Math.round(amount * 100) / 100,
-      note,
+      note: appendNoteMeta(note, denomination, quantity),
     },
   })
+
+  const itemNote = splitNoteMeta(item.note)
 
   return NextResponse.json({
     ok: true,
@@ -84,7 +138,9 @@ export async function POST(request: Request) {
       id: item.id,
       child: item.child,
       amount: item.amount,
-      note: item.note,
+      note: itemNote.note,
+      denomination: itemNote.denomination,
+      quantity: itemNote.quantity,
       createdAt: item.createdAt.toISOString(),
     },
   })
