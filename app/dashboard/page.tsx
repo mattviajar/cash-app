@@ -2477,7 +2477,7 @@ export default function DashboardPage() {
   const kidTransactionsView = (
     <section className="grid lg:grid-cols-2 gap-6">
       <div className="glass-card">
-        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Recent Transactions</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Transaction History</h3>
         <div className="space-y-3">
           {kidHistory.slice(0, 6).map((item) => (
             <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
@@ -2490,16 +2490,19 @@ export default function DashboardPage() {
               </p>
             </div>
           ))}
+          {kidHistory.length === 0 && (
+            <p className="font-inter text-gray-700">No transactions yet.</p>
+          )}
         </div>
       </div>
 
       <div className="glass-card">
-        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Pending Requests</h3>
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Pending Authorization</h3>
         <div className="space-y-3">
-          {pendingWithdrawals.length === 0 ? (
+          {pendingForKid.length === 0 ? (
             <p className="font-inter text-gray-700">No pending requests.</p>
           ) : (
-            pendingWithdrawals.map((item) => (
+            pendingForKid.map((item) => (
               <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3">
                 <p className="font-inter font-semibold text-gray-800">{formatPHP(item.amount)} • {item.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{item.createdAt}</p>
@@ -3493,25 +3496,25 @@ export default function DashboardPage() {
   )
 
   const kidContent: Record<MenuKey, JSX.Element> = {
-    dashboard: kidDashboardView,
-    transactions: (
+    dashboard: (
       <section className="space-y-6">
-        {kidTransactionsView}
-        {kidStatisticsView}
+        {kidDashboardView}
+        {kidGoalsView}
       </section>
     ),
+    transactions: kidTransactionsView,
     settings: kidSettingsView,
     profile: kidProfileView,
   }
 
   const parentContent: Record<MenuKey, JSX.Element> = {
-    dashboard: parentDashboardView,
-    transactions: (
+    dashboard: (
       <section className="space-y-6">
-        {parentTransactionsView}
-        {parentStatisticsView}
+        {parentDashboardView}
+        {parentGoalsView}
       </section>
     ),
+    transactions: parentTransactionsView,
     settings: parentSettingsView,
     profile: parentProfileView,
   }
