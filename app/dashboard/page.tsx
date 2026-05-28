@@ -2,18 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Bar } from 'react-chartjs-2'
-import {
-  BarElement,
-  CategoryScale,
-  Chart as ChartJS,
-  Legend,
-  LinearScale,
-  Tooltip,
-  type ChartOptions,
-} from 'chart.js'
-
-ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
 type Role = 'kid' | 'parent'
 type MenuKey = 'dashboard' | 'progress' | 'transactions' | 'settings' | 'profile'
@@ -1398,46 +1386,6 @@ export default function DashboardPage() {
     }))
   })
 
-  const kidGoalChartData = useMemo(() => ({
-    labels: kidGoals.map((goal) => goal.name),
-    datasets: [
-      {
-        label: 'Saved',
-        data: kidGoals.map((goal) => Math.min(goal.saved, goal.target)),
-        backgroundColor: 'rgba(37, 99, 235, 0.75)',
-        borderRadius: 8,
-      },
-      {
-        label: 'Target',
-        data: kidGoals.map((goal) => goal.target),
-        backgroundColor: 'rgba(20, 184, 166, 0.35)',
-        borderRadius: 8,
-      },
-    ],
-  }), [kidGoals])
-
-  const kidGoalChartOptions = useMemo<ChartOptions<'bar'>>(() => ({
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: {
-        position: 'top',
-      },
-      tooltip: {
-        callbacks: {
-          label: (ctx) => `${ctx.dataset.label}: ${formatPHP(Number(ctx.raw ?? 0))}`,
-        },
-      },
-    },
-    scales: {
-      y: {
-        beginAtZero: true,
-        ticks: {
-          callback: (value) => formatPHP(Number(value)),
-        },
-      },
-    },
-  }), [])
   const currentUserName = (role === 'kid' ? kidName : parentName).trim().toLowerCase()
   const lockHeldByOtherUser =
     deviceLockStatus.active &&
@@ -2413,6 +2361,21 @@ export default function DashboardPage() {
           />
           <button type="submit" className="btn-primary">Add Goal</button>
         </form>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveMenu('dashboard')
+              setKidQuickSection('withdraw')
+            }}
+            className="dashboard-action-secondary px-4 py-2"
+          >
+            Withdraw for Goal
+          </button>
+          <p className="text-xs font-inter text-gray-600">
+            Withdrawals update your balance, then Total Saved, Goal Target, and Completion refresh automatically.
+          </p>
+        </div>
       </div>
 
       <div className="glass-card">
@@ -2439,17 +2402,6 @@ export default function DashboardPage() {
             )
           })}
         </div>
-      </div>
-
-      <div className="glass-card">
-        <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Goal Completion Graph</h4>
-        {kidGoals.length === 0 ? (
-          <p className="font-inter text-gray-700">Add at least one goal to show the graph.</p>
-        ) : (
-          <div className="h-72">
-            <Bar data={kidGoalChartData} options={kidGoalChartOptions} />
-          </div>
-        )}
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
