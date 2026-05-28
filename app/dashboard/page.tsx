@@ -3307,7 +3307,7 @@ export default function DashboardPage() {
     <section className="dashboard-panel space-y-4">
       <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Profile</h3>
       <div className="dashboard-list-item font-inter">
-        <p><span className="font-semibold">Name:</span> Parent Account</p>
+        <p><span className="font-semibold">Username:</span> {parentName || 'Parent Account'}</p>
         <p><span className="font-semibold">Role:</span> Parent</p>
         <p><span className="font-semibold">Permissions:</span> View balances, approve withdrawals, manage settings</p>
       </div>
