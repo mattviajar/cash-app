@@ -44,6 +44,8 @@ type Goal = {
   name: string
   saved: number
   target: number
+  completed?: boolean
+  completedAt?: string
 }
 
 type MachineInventory = {
@@ -151,6 +153,13 @@ function withComputedGoalSavings(goals: Goal[], availableBalance: number): Goal[
 
   return goals.map((goal) => {
     const target = Math.max(0, Number.isFinite(goal.target) ? goal.target : 0)
+    if (goal.completed) {
+      return {
+        ...goal,
+        saved: Math.round(target * 100) / 100,
+      }
+    }
+
     const saved = Math.min(remaining, target)
     remaining = Math.max(0, remaining - saved)
 
@@ -1952,6 +1961,18 @@ export default function DashboardPage() {
       return
     }
 
+    const goalIdMatch = request.note.match(/\[goalId:(\d+)\]/i)
+    const goalId = goalIdMatch ? Number(goalIdMatch[1]) : NaN
+    const normalizedGoalNote = request.note.replace(/\s*\[goalId:\d+\]\s*/i, '').trim()
+    const isGoalRequest = normalizedGoalNote.toLowerCase().startsWith('goal withdrawal:')
+    const goalName = isGoalRequest ? normalizedGoalNote.replace(/^goal withdrawal:\s*/i, '').trim() : ''
+    if (isGoalRequest) {
+      markGoalCompleted(
+        request.child,
+        (goal) => (Number.isFinite(goalId) ? goal.id === goalId : false) || (goal.name === goalName && Math.round(goal.target) === Math.round(request.amount))
+      )
+    }
+
     setWithdrawPhase('dispensing', `Dispensing ${formatPHP(request.amount)} for ${request.child}...`)
 
     await fetch(`/api/pending-withdrawals?id=${id}&parent=${encodeURIComponent(parentName || locker)}`, { method: 'DELETE' })
@@ -2139,6 +2160,34 @@ export default function DashboardPage() {
     setNewParentGoalTarget('')
   }
 
+  const markGoalCompleted = (account: string, matcher: (goal: Goal) => boolean) => {
+    setKidGoalsByAccount((prev) => {
+      const goals = prev[account] ?? []
+      let changed = false
+      const updated = goals.map((goal) => {
+        if (!matcher(goal) || goal.completed) {
+          return goal
+        }
+        changed = true
+        return {
+          ...goal,
+          completed: true,
+          completedAt: new Date().toISOString(),
+          saved: goal.target,
+        }
+      })
+
+      if (!changed) {
+        return prev
+      }
+
+      return {
+        ...prev,
+        [account]: updated,
+      }
+    })
+  }
+
   const requestGoalWithdrawal = async (goal: Goal) => {
     if (!kidName) return
 
@@ -2158,7 +2207,7 @@ export default function DashboardPage() {
       body: JSON.stringify({
         child: kidName,
         amount,
-        note: `Goal withdrawal: ${goal.name}`,
+        note: `Goal withdrawal: ${goal.name} [goalId:${goal.id}]`,
       }),
     })
 
@@ -2177,6 +2226,79 @@ export default function DashboardPage() {
     alert(`Request sent: ${formatPHP(amount)} for goal "${goal.name}" is pending parent approval.`)
   }
 
+  const withdrawParentGoal = async (goal: Goal) => {
+    if (!parentName) return
+
+    const amount = Number(goal.target)
+    if (!Number.isFinite(amount) || amount <= 0) return
+
+    if (parentBalance < amount) {
+      alert(`Not enough balance for this goal. Required: ${formatPHP(amount)}, Available: ${formatPHP(parentBalance)}`)
+      return
+    }
+
+    setParentWithdrawBusy(true)
+    try {
+      startWithdrawProgress('parent', amount)
+      const lock = await acquireDeviceLock(parentName, 'withdraw')
+      if (!lock.ok) {
+        setWithdrawError(lock.message ?? 'Unable to lock device right now.')
+        alert(`❌ ${lock.message ?? 'Unable to lock device right now.'}`)
+        return
+      }
+      setActiveWithdrawLockOwner(parentName)
+
+      setWithdrawPhase('sending', `Sending goal withdrawal for ${goal.name}...`)
+      const res = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: `WITHDRAW ${Math.round(amount)}`,
+          account: parentName,
+          lockOwner: parentName,
+          role: 'parent',
+          autoCreate: true,
+          note: `Goal withdrawal: ${goal.name}`,
+        }),
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Parent goal withdrawal failed' }))
+        setWithdrawError(data.error ?? 'Parent goal withdrawal failed')
+        alert(`❌ ${data.error ?? 'Parent goal withdrawal failed'}`)
+        return
+      }
+
+      setWithdrawPhase('dispensing', `Dispensing ${formatPHP(amount)} for goal ${goal.name}...`)
+
+      markGoalCompleted(parentName, (item) => item.id === goal.id)
+
+      const latestParentBalance = await fetchAccountBalance(parentName)
+      if (latestParentBalance !== null) {
+        setParentBalance(Math.round(latestParentBalance * 100) / 100)
+      }
+
+      const txRes = await fetch(`/api/accounts/transactions?parent=${encodeURIComponent(parentName)}`, { cache: 'no-store' })
+      if (txRes.ok) {
+        const txData = await txRes.json() as { transactions: Array<{ id: number; child: string; amount: number; signedAmount?: number; note: string; when: string; kind: string }> }
+        setHistory(
+          txData.transactions.map((entry) => ({
+            id: entry.id,
+            child: entry.child,
+            amount: Math.abs(entry.signedAmount ?? entry.amount),
+            note: entry.note,
+            when: entry.when,
+            kind: (entry.kind.includes('deposit') ? 'hardware' : 'withdrawal') as HistoryKind,
+          }))
+        )
+      }
+
+      void refreshInventory()
+      alert(`Goal withdrawn: ${formatPHP(amount)} for "${goal.name}"`)
+    } finally {
+      setParentWithdrawBusy(false)
+    }
+  }
   const openKidDepositModal = async () => {
     const lock = await acquireDeviceLock(kidName, 'deposit')
     if (!lock.ok) {
@@ -2451,7 +2573,7 @@ export default function DashboardPage() {
           {kidGoals.map((goal) => {
             const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
             const remaining = goal.target - goal.saved
-            const goalMet = balance >= goal.target
+            const goalMet = !!goal.completed || balance >= goal.target
             return (
               <div key={goal.id} className={`rounded-xl p-4 border-2 ${goalMet ? 'bg-emerald-50 border-emerald-300 shadow-[0_8px_22px_rgba(16,185,129,0.2)]' : 'bg-white/70 border-transparent'}`}>
                 <div className="flex items-start justify-between gap-3 text-sm font-inter font-semibold text-gray-700 mb-1">
@@ -2461,10 +2583,10 @@ export default function DashboardPage() {
                     <button
                       type="button"
                       onClick={() => { void requestGoalWithdrawal(goal) }}
-                      disabled={balance < goal.target}
+                      disabled={goal.completed || balance < goal.target}
                       className="dashboard-action-secondary px-3 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Withdraw
+                      {goal.completed ? 'Completed' : 'Withdraw'}
                     </button>
                   </div>
                 </div>
@@ -2472,8 +2594,8 @@ export default function DashboardPage() {
                   <div className={`h-full ${goalMet ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-blue-600 to-teal-500'}`} style={{ width: `${percent}%` }}></div>
                 </div>
                 <div className="mt-3 flex items-center justify-between text-xs font-inter text-gray-600">
-                  <span>{goalMet ? 'Goal reached' : `${percent}% complete`}</span>
-                  <span>{balance < goal.target ? `Need ${formatPHP(goal.target - balance)} more balance to request` : `${formatPHP(remaining)} to go`}</span>
+                  <span>{goal.completed ? 'Completed and withdrawn' : goalMet ? 'Goal reached' : `${percent}% complete`}</span>
+                  <span>{goal.completed ? 'Ready for next goal' : balance < goal.target ? `Need ${formatPHP(goal.target - balance)} more balance to request` : `${formatPHP(remaining)} to go`}</span>
                 </div>
               </div>
             )
@@ -3040,15 +3162,29 @@ export default function DashboardPage() {
             <p className="font-inter text-gray-700">No parent goals yet.</p>
           ) : parentOwnGoals.map((goal) => {
             const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
-            const goalMet = parentBalance >= goal.target
+            const goalMet = !!goal.completed || parentBalance >= goal.target
             return (
               <div key={goal.id} className={`rounded-xl p-4 border-2 ${goalMet ? 'bg-emerald-50 border-emerald-300 shadow-[0_8px_22px_rgba(16,185,129,0.2)]' : 'bg-white/70 border-transparent'}`}>
-                <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
+                <div className="flex items-start justify-between gap-3 text-sm font-inter font-semibold text-gray-700 mb-1">
                   <span>{goal.name}</span>
-                  <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
+                  <div className="flex items-center gap-2">
+                    <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
+                    <button
+                      type="button"
+                      onClick={() => { void withdrawParentGoal(goal) }}
+                      disabled={parentWithdrawBusy || goal.completed || parentBalance < goal.target}
+                      className="dashboard-action-secondary px-3 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {goal.completed ? 'Completed' : parentWithdrawBusy ? 'Processing...' : 'Withdraw'}
+                    </button>
+                  </div>
                 </div>
                 <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-2">
                   <div className={`h-full ${goalMet ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-blue-600 to-teal-500'}`} style={{ width: `${percent}%` }}></div>
+                </div>
+                <div className="mt-3 flex items-center justify-between text-xs font-inter text-gray-600">
+                  <span>{goal.completed ? 'Completed and withdrawn' : goalMet ? 'Goal reached' : `${percent}% complete`}</span>
+                  <span>{goal.completed ? 'Ready for next goal' : parentBalance < goal.target ? `Need ${formatPHP(goal.target - parentBalance)} more balance to withdraw` : 'Ready to withdraw'}</span>
                 </div>
               </div>
             )
