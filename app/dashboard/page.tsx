@@ -3497,27 +3497,42 @@ export default function DashboardPage() {
     </section>
   )
 
+  const kidProgressView = (
+    <section className="space-y-6">
+      <div className="glass-card">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-2">Progress</h3>
+        <p className="font-inter text-gray-700 text-sm">
+          Add a goal with a target amount, then track completion as your balance grows.
+          Goals automatically light up green when your current balance can fully cover the target.
+        </p>
+      </div>
+      {kidGoalsView}
+    </section>
+  )
+
+  const parentProgressView = (
+    <section className="space-y-6">
+      <div className="glass-card">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-2">Progress</h3>
+        <p className="font-inter text-gray-700 text-sm">
+          Track each child&apos;s goals and completion status in one place.
+        </p>
+      </div>
+      {parentGoalsView}
+    </section>
+  )
+
   const kidContent: Record<MenuKey, JSX.Element> = {
-    dashboard: (
-      <section className="space-y-6">
-        {kidDashboardView}
-        {kidGoalsView}
-      </section>
-    ),
-    progress: kidGoalsView,
+    dashboard: kidDashboardView,
+    progress: kidProgressView,
     transactions: kidTransactionsView,
     settings: kidSettingsView,
     profile: kidProfileView,
   }
 
   const parentContent: Record<MenuKey, JSX.Element> = {
-    dashboard: (
-      <section className="space-y-6">
-        {parentDashboardView}
-        {parentGoalsView}
-      </section>
-    ),
-    progress: parentGoalsView,
+    dashboard: parentDashboardView,
+    progress: parentProgressView,
     transactions: parentTransactionsView,
     settings: parentSettingsView,
     profile: parentProfileView,
