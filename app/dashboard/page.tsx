@@ -73,6 +73,7 @@ type ProfileAccount = {
   role: Role
   email: string
   securityQuestion: string
+  parentUsername?: string
 }
 
 type DepositDebugState = {
@@ -103,21 +104,21 @@ const withdrawDenominations = [
 type WithdrawDenominationKey = typeof withdrawDenominations[number]['field']
 
 const menuItems: Array<{ key: MenuKey; label: string; icon: string }> = [
-  { key: 'dashboard', label: 'Dashboard', icon: '▦' },
-  { key: 'transactions', label: 'Transactions', icon: '◍' },
-  { key: 'settings', label: 'Settings', icon: '◌' },
-  { key: 'profile', label: 'Profile', icon: '◉' },
+  { key: 'dashboard', label: 'Dashboard', icon: 'Ã¢â€“Â¦' },
+  { key: 'transactions', label: 'Transactions', icon: 'Ã¢â€”Â' },
+  { key: 'settings', label: 'Settings', icon: 'Ã¢â€”Å’' },
+  { key: 'profile', label: 'Profile', icon: 'Ã¢â€”â€°' },
 ]
 
 const initialKidGoals: Goal[] = []
 
 const characterOptions = [
-  { id: 'astronaut', emoji: '🧑‍🚀', title: 'Space Saver' },
-  { id: 'wizard', emoji: '🧙', title: 'Money Wizard' },
-  { id: 'ninja', emoji: '🥷', title: 'Budget Ninja' },
-  { id: 'robot', emoji: '🤖', title: 'Smart Saver Bot' },
-  { id: 'athlete', emoji: '🏃', title: 'Goal Sprinter' },
-  { id: 'artist', emoji: '🧑‍🎨', title: 'Creative Planner' },
+  { id: 'astronaut', emoji: 'Ã°Å¸Â§â€˜Ã¢â‚¬ÂÃ°Å¸Å¡â‚¬', title: 'Space Saver' },
+  { id: 'wizard', emoji: 'Ã°Å¸Â§â„¢', title: 'Money Wizard' },
+  { id: 'ninja', emoji: 'Ã°Å¸Â¥Â·', title: 'Budget Ninja' },
+  { id: 'robot', emoji: 'Ã°Å¸Â¤â€“', title: 'Smart Saver Bot' },
+  { id: 'athlete', emoji: 'Ã°Å¸ÂÆ’', title: 'Goal Sprinter' },
+  { id: 'artist', emoji: 'Ã°Å¸Â§â€˜Ã¢â‚¬ÂÃ°Å¸Å½Â¨', title: 'Creative Planner' },
 ]
 
 const STORAGE_KEYS = {
@@ -672,7 +673,7 @@ export default function DashboardPage() {
   // NOTE: We intentionally do NOT mirror `balance` back into `kidBalances`
   // here. Every transaction site (deposit/withdraw/initial load) already
   // updates `kidBalances` explicitly. A reciprocal effect would form a
-  // feedback loop with the kidBalances→balance sync below and cause the UI
+  // feedback loop with the kidBalancesÃ¢â€ â€™balance sync below and cause the UI
   // to jitter between the cached default and the freshly-fetched DB value.
 
   useEffect(() => {
@@ -1194,7 +1195,7 @@ export default function DashboardPage() {
     }
   }, [isHydrated, role, pendingDepositKid])
 
-  // Countdown tick — decrements every second while a deposit session is active.
+  // Countdown tick Ã¢â‚¬â€ decrements every second while a deposit session is active.
   useEffect(() => {
     const sessionActive = kidDepositModalOpen || pendingDepositKid !== null
     if (!sessionActive || depositCountdown <= 0) return
@@ -1459,7 +1460,7 @@ export default function DashboardPage() {
       const lock = await acquireDeviceLock(kidName, 'withdraw')
       if (!lock.ok) {
         setWithdrawError(lock.message ?? 'Unable to lock device right now.')
-        alert(`❌ ${lock.message}`)
+        alert(`Ã¢ÂÅ’ ${lock.message}`)
         return
       }
       setActiveWithdrawLockOwner(kidName)
@@ -1483,7 +1484,7 @@ export default function DashboardPage() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Withdrawal failed' }))
         setWithdrawError(data.error ?? 'Withdrawal failed')
-        alert(`❌ ${data.error ?? 'Withdrawal failed'}`)
+        alert(`Ã¢ÂÅ’ ${data.error ?? 'Withdrawal failed'}`)
         return
       }
 
@@ -1519,7 +1520,7 @@ export default function DashboardPage() {
       })
       if (!createRes.ok) {
         const data = await createRes.json().catch(() => ({ error: 'Failed to create withdrawal request' }))
-        alert(`❌ ${data.error ?? 'Failed to create withdrawal request'}`)
+        alert(`Ã¢ÂÅ’ ${data.error ?? 'Failed to create withdrawal request'}`)
         return
       }
 
@@ -1546,7 +1547,7 @@ export default function DashboardPage() {
       const lock = await acquireDeviceLock(parentName, 'withdraw')
       if (!lock.ok) {
         setWithdrawError(lock.message ?? 'Unable to lock device right now.')
-        alert(`❌ ${lock.message}`)
+        alert(`Ã¢ÂÅ’ ${lock.message}`)
         return
       }
       setActiveWithdrawLockOwner(parentName)
@@ -1570,7 +1571,7 @@ export default function DashboardPage() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Parent withdrawal failed' }))
         setWithdrawError(data.error ?? 'Parent withdrawal failed')
-        alert(`❌ ${data.error ?? 'Parent withdrawal failed'}`)
+        alert(`Ã¢ÂÅ’ ${data.error ?? 'Parent withdrawal failed'}`)
         return
       }
 
@@ -1633,7 +1634,7 @@ export default function DashboardPage() {
       const lock = await acquireDeviceLock(parentName, 'withdraw')
       if (!lock.ok) {
         setWithdrawError(lock.message ?? 'Unable to lock device right now.')
-        alert(`❌ ${lock.message}`)
+        alert(`Ã¢ÂÅ’ ${lock.message}`)
         return
       }
       setActiveWithdrawLockOwner(parentName)
@@ -1658,7 +1659,7 @@ export default function DashboardPage() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: 'Child withdrawal failed' }))
         setWithdrawError(data.error ?? 'Child withdrawal failed')
-        alert(`❌ ${data.error ?? 'Child withdrawal failed'}`)
+        alert(`Ã¢ÂÅ’ ${data.error ?? 'Child withdrawal failed'}`)
         return
       }
 
@@ -1814,7 +1815,7 @@ export default function DashboardPage() {
     const lock = await acquireDeviceLock(locker, 'withdraw')
     if (!lock.ok) {
       setWithdrawError(lock.message ?? 'Unable to lock device right now.')
-      alert(`❌ ${lock.message}`)
+      alert(`Ã¢ÂÅ’ ${lock.message}`)
       return
     }
     setActiveWithdrawLockOwner(locker)
@@ -1837,7 +1838,7 @@ export default function DashboardPage() {
     if (!commandRes.ok) {
       const data = await commandRes.json().catch(() => ({ error: 'Failed to process withdrawal request' }))
       setWithdrawError(data.error ?? 'Failed to process withdrawal request')
-      alert(`❌ ${data.error ?? 'Failed to process withdrawal request'}`)
+      alert(`Ã¢ÂÅ’ ${data.error ?? 'Failed to process withdrawal request'}`)
       return
     }
 
@@ -1882,7 +1883,7 @@ export default function DashboardPage() {
     const parentQuery = parentName ? `&parent=${encodeURIComponent(parentName)}` : ''
     const res = await fetch(`/api/pending-withdrawals?id=${id}${parentQuery}`, { method: 'DELETE' })
     if (!res.ok) {
-      alert('❌ Failed to decline request')
+      alert('Ã¢ÂÅ’ Failed to decline request')
       return
     }
     setPendingWithdrawals((prev) => prev.filter((item) => item.id !== id))
@@ -1892,7 +1893,7 @@ export default function DashboardPage() {
     const locker = parentName || username
     const lock = await acquireDeviceLock(locker, 'deposit')
     if (!lock.ok) {
-      alert(`❌ ${lock.message}`)
+      alert(`Ã¢ÂÅ’ ${lock.message}`)
       return
     }
 
@@ -2008,7 +2009,7 @@ export default function DashboardPage() {
   const openKidDepositModal = async () => {
     const lock = await acquireDeviceLock(kidName, 'deposit')
     if (!lock.ok) {
-      alert(`❌ ${lock.message}`)
+      alert(`Ã¢ÂÅ’ ${lock.message}`)
       return
     }
 
@@ -2041,7 +2042,7 @@ export default function DashboardPage() {
         <div className="relative z-10 max-w-sm">
         <p className="text-[11px] uppercase tracking-[0.22em] text-white/80 font-inter font-semibold">Current Balance</p>
         <h2 className="text-4xl sm:text-5xl font-sora font-black text-white mt-2 drop-shadow-[0_6px_18px_rgba(12,44,87,0.34)]">
-          {kidShowBalance ? formatPHP(balance) : '•••••'}
+          {kidShowBalance ? formatPHP(balance) : 'Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢'}
         </h2>
         <p className="text-sm text-white/88 font-inter mt-3 leading-relaxed">
           {lastHardwareDepositAt && lastHardwareDepositAmount !== null
@@ -2058,7 +2059,7 @@ export default function DashboardPage() {
           disabled={lockHeldByOtherUser}
           className="dashboard-action-primary disabled:opacity-50"
         >
-          <span className="sm:hidden text-lg">💰</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€™Â°</span>
           <span className="hidden sm:inline">Deposit</span>
         </button>
         <button
@@ -2066,7 +2067,7 @@ export default function DashboardPage() {
           onClick={() => setKidQuickSection((prev) => prev === 'withdraw' ? 'none' : 'withdraw')}
           className="dashboard-action-secondary"
         >
-          <span className="sm:hidden text-lg">💸</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€™Â¸</span>
           <span className="hidden sm:inline">Withdraw</span>
         </button>
         <button
@@ -2074,7 +2075,7 @@ export default function DashboardPage() {
           onClick={() => setShowKidMoreActions((prev) => !prev)}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">⋯</span>
+          <span className="sm:hidden text-lg">Ã¢â€¹Â¯</span>
           <span className="hidden sm:inline">{showKidMoreActions ? 'Less' : 'More'}</span>
         </button>
       </div>
@@ -2086,7 +2087,7 @@ export default function DashboardPage() {
           onClick={() => setKidQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">🧾</span>
+          <span className="sm:hidden text-lg">Ã°Å¸Â§Â¾</span>
           <span className="hidden sm:inline">Activity</span>
         </button>
         <button
@@ -2094,7 +2095,7 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('profile')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">👤</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€˜Â¤</span>
           <span className="hidden sm:inline">Profile</span>
         </button>
         <button
@@ -2102,7 +2103,7 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('settings')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">⚙️</span>
+          <span className="sm:hidden text-lg">Ã¢Å¡â„¢Ã¯Â¸Â</span>
           <span className="hidden sm:inline">Settings</span>
         </button>
       </div>
@@ -2121,7 +2122,7 @@ export default function DashboardPage() {
               const count = machineInventory?.[option.field] ?? 0
               return (
                 <option key={option.field} value={option.field}>
-                  {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                  {option.label} Ã¢â‚¬Â¢ {inventoryLoading ? 'loading...' : `${count} in stock`}
                 </option>
               )
             })}
@@ -2322,20 +2323,20 @@ export default function DashboardPage() {
         <div className="glass-card">
           <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Goal Ideas</h4>
           <div className="space-y-2 font-inter text-gray-700">
-            <p>🎮 Save for a game accessory</p>
-            <p>🎧 Upgrade study headphones</p>
-            <p>📚 Build a mini book budget</p>
-            <p>🏀 Sports gear target challenge</p>
+            <p>Ã°Å¸Å½Â® Save for a game accessory</p>
+            <p>Ã°Å¸Å½Â§ Upgrade study headphones</p>
+            <p>Ã°Å¸â€œÅ¡ Build a mini book budget</p>
+            <p>Ã°Å¸Ââ‚¬ Sports gear target challenge</p>
           </div>
         </div>
 
         <div className="glass-card">
           <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Reach Goals Faster</h4>
           <div className="space-y-2 font-inter text-gray-700">
-            <p>• Keep each withdrawal note short and clear.</p>
-            <p>• Try to keep one no-spend day each week.</p>
-            <p>• Check progress every 2–3 days.</p>
-            <p>• Focus on one main goal at a time.</p>
+            <p>Ã¢â‚¬Â¢ Keep each withdrawal note short and clear.</p>
+            <p>Ã¢â‚¬Â¢ Try to keep one no-spend day each week.</p>
+            <p>Ã¢â‚¬Â¢ Check progress every 2Ã¢â‚¬â€œ3 days.</p>
+            <p>Ã¢â‚¬Â¢ Focus on one main goal at a time.</p>
           </div>
         </div>
       </div>
@@ -2369,7 +2370,7 @@ export default function DashboardPage() {
           ) : (
             pendingWithdrawals.map((item) => (
               <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3">
-                <p className="font-inter font-semibold text-gray-800">{formatPHP(item.amount)} • {item.note}</p>
+                <p className="font-inter font-semibold text-gray-800">{formatPHP(item.amount)} Ã¢â‚¬Â¢ {item.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{item.createdAt}</p>
               </div>
             ))
@@ -2450,19 +2451,19 @@ export default function DashboardPage() {
         <div className="glass-card">
           <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Goal Progress Stats</h3>
           <div className="space-y-3 font-inter text-gray-700">
-            <p>• Goals active: <span className="font-semibold">{kidGoals.length}</span></p>
-            <p>• Combined progress: <span className="font-semibold">{totalGoalProgress}%</span></p>
-            <p>• Top goal: <span className="font-semibold">{topGoal ? topGoal.name : 'No goal yet'}</span></p>
-            <p>• Total saved toward goals: <span className="font-semibold">{formatPHP(totalGoalSaved)}</span></p>
+            <p>Ã¢â‚¬Â¢ Goals active: <span className="font-semibold">{kidGoals.length}</span></p>
+            <p>Ã¢â‚¬Â¢ Combined progress: <span className="font-semibold">{totalGoalProgress}%</span></p>
+            <p>Ã¢â‚¬Â¢ Top goal: <span className="font-semibold">{topGoal ? topGoal.name : 'No goal yet'}</span></p>
+            <p>Ã¢â‚¬Â¢ Total saved toward goals: <span className="font-semibold">{formatPHP(totalGoalSaved)}</span></p>
           </div>
         </div>
 
         <div className="glass-card">
           <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Approval & Activity</h3>
           <div className="space-y-3 font-inter text-gray-700">
-            <p>• Pending requests: <span className="font-semibold">{pendingForKid.length}</span></p>
-            <p>• Approval completion rate: <span className="font-semibold">{kidApprovalRate}%</span></p>
-            <p>• Current policy: <span className="font-semibold">{instantWithdrawals ? 'Instant mode' : 'Parent approval mode'}</span></p>
+            <p>Ã¢â‚¬Â¢ Pending requests: <span className="font-semibold">{pendingForKid.length}</span></p>
+            <p>Ã¢â‚¬Â¢ Approval completion rate: <span className="font-semibold">{kidApprovalRate}%</span></p>
+            <p>Ã¢â‚¬Â¢ Current policy: <span className="font-semibold">{instantWithdrawals ? 'Instant mode' : 'Parent approval mode'}</span></p>
           </div>
         </div>
       </div>
@@ -2601,7 +2602,7 @@ export default function DashboardPage() {
         <div className="relative z-10 max-w-sm">
         <p className="text-[11px] uppercase tracking-[0.22em] text-white/80 font-inter font-semibold">Parent Wallet</p>
         <h2 className="text-4xl sm:text-5xl font-sora font-black text-white mt-2 drop-shadow-[0_6px_18px_rgba(11,49,96,0.34)]">{formatPHP(parentBalance)}</h2>
-        <p className="text-sm text-white/88 font-inter mt-3 leading-relaxed">Kids: {validKidAccounts.length} • Pending requests: {parentPending.length}</p>
+        <p className="text-sm text-white/88 font-inter mt-3 leading-relaxed">Kids: {validKidAccounts.length} Ã¢â‚¬Â¢ Pending requests: {parentPending.length}</p>
         </div>
       </div>
 
@@ -2611,7 +2612,7 @@ export default function DashboardPage() {
           onClick={() => setParentQuickSection((prev) => prev === 'deposit' ? 'none' : 'deposit')}
           className="dashboard-action-primary"
         >
-          <span className="sm:hidden text-lg">💰</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€™Â°</span>
           <span className="hidden sm:inline">Deposit</span>
         </button>
         <button
@@ -2619,7 +2620,7 @@ export default function DashboardPage() {
           onClick={() => setParentQuickSection((prev) => prev === 'withdraw' ? 'none' : 'withdraw')}
           className="dashboard-action-secondary"
         >
-          <span className="sm:hidden text-lg">💸</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€™Â¸</span>
           <span className="hidden sm:inline">Withdraw</span>
         </button>
         <button
@@ -2627,7 +2628,7 @@ export default function DashboardPage() {
           onClick={() => setShowParentMoreActions((prev) => !prev)}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">⋯</span>
+          <span className="sm:hidden text-lg">Ã¢â€¹Â¯</span>
           <span className="hidden sm:inline">{showParentMoreActions ? 'Less' : 'More'}</span>
         </button>
       </div>
@@ -2639,7 +2640,7 @@ export default function DashboardPage() {
           onClick={() => setParentQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">🧾</span>
+          <span className="sm:hidden text-lg">Ã°Å¸Â§Â¾</span>
           <span className="hidden sm:inline">Activity</span>
         </button>
         <button
@@ -2647,7 +2648,7 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('settings')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">⚙️</span>
+          <span className="sm:hidden text-lg">Ã¢Å¡â„¢Ã¯Â¸Â</span>
           <span className="hidden sm:inline">Settings</span>
         </button>
         <button
@@ -2655,7 +2656,7 @@ export default function DashboardPage() {
           onClick={() => setActiveMenu('profile')}
           className="dashboard-action-soft"
         >
-          <span className="sm:hidden text-lg">👤</span>
+          <span className="sm:hidden text-lg">Ã°Å¸â€˜Â¤</span>
           <span className="hidden sm:inline">Profile</span>
         </button>
       </div>
@@ -2698,7 +2699,7 @@ export default function DashboardPage() {
                 const count = machineInventory?.[option.field] ?? 0
                 return (
                   <option key={option.field} value={option.field}>
-                    {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                    {option.label} Ã¢â‚¬Â¢ {inventoryLoading ? 'loading...' : `${count} in stock`}
                   </option>
                 )
               })}
@@ -2750,7 +2751,7 @@ export default function DashboardPage() {
                 const count = machineInventory?.[option.field] ?? 0
                 return (
                   <option key={option.field} value={option.field}>
-                    {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                    {option.label} Ã¢â‚¬Â¢ {inventoryLoading ? 'loading...' : `${count} in stock`}
                   </option>
                 )
               })}
@@ -2790,7 +2791,7 @@ export default function DashboardPage() {
           <div className="space-y-2">
             {parentPending.slice(0, 6).map((item) => (
               <div key={item.id} className="dashboard-list-item px-3 py-2">
-                <p className="font-inter font-semibold text-gray-800">{item.child} • {formatPHP(item.amount)}</p>
+                <p className="font-inter font-semibold text-gray-800">{item.child} Ã¢â‚¬Â¢ {formatPHP(item.amount)}</p>
                 <div className="mt-2 flex gap-2">
                   <button type="button" onClick={() => approvePending(item.id)} className="dashboard-action-secondary px-3 py-1 text-sm rounded-xl">Approve</button>
                   <button type="button" onClick={() => declinePending(item.id)} className="dashboard-action-soft px-3 py-1 text-sm rounded-xl">Decline</button>
@@ -2829,7 +2830,7 @@ export default function DashboardPage() {
           return (
             <div key={goal.key}>
               <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
-                <span>{goal.child} • {goal.name}</span>
+                <span>{goal.child} Ã¢â‚¬Â¢ {goal.name}</span>
                 <span>{percent}%</span>
               </div>
               <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden">
@@ -2852,8 +2853,8 @@ export default function DashboardPage() {
           ) : (
             parentPending.map((item) => (
               <div key={item.id} className="bg-white/70 rounded-xl px-4 py-3">
-                <p className="font-inter font-semibold text-gray-800">{item.child} • {formatPHP(item.amount)}</p>
-                <p className="text-xs text-gray-600 font-inter mb-3">{item.note} • {item.createdAt}</p>
+                <p className="font-inter font-semibold text-gray-800">{item.child} Ã¢â‚¬Â¢ {formatPHP(item.amount)}</p>
+                <p className="text-xs text-gray-600 font-inter mb-3">{item.note} Ã¢â‚¬Â¢ {item.createdAt}</p>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -2883,7 +2884,7 @@ export default function DashboardPage() {
           {history.slice(0, 8).map((entry) => (
             <div key={entry.id} className="bg-white/70 rounded-xl px-4 py-3 flex items-center justify-between">
               <div>
-                <p className="font-inter font-semibold text-gray-800">{entry.child} • {entry.note}</p>
+                <p className="font-inter font-semibold text-gray-800">{entry.child} Ã¢â‚¬Â¢ {entry.note}</p>
                 <p className="text-xs text-gray-600 font-inter">{entry.when}</p>
               </div>
               <p className={`font-sora font-bold ${getSignedTransactionAmount(entry) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
@@ -2983,9 +2984,9 @@ export default function DashboardPage() {
         <div className="glass-card">
           <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Policy Snapshot</h3>
           <div className="space-y-2 font-inter text-gray-700">
-            <p>• Instant withdrawals: <span className="font-semibold">{instantWithdrawals ? 'Enabled' : 'Disabled'}</span></p>
-            <p>• Auto-approve limit: <span className="font-semibold">{formatPHP(parentAutoApproveLimit)}</span></p>
-            <p>• Spending alerts: <span className="font-semibold">{parentSpendingAlerts ? 'On' : 'Off'}</span></p>
+            <p>Ã¢â‚¬Â¢ Instant withdrawals: <span className="font-semibold">{instantWithdrawals ? 'Enabled' : 'Disabled'}</span></p>
+            <p>Ã¢â‚¬Â¢ Auto-approve limit: <span className="font-semibold">{formatPHP(parentAutoApproveLimit)}</span></p>
+            <p>Ã¢â‚¬Â¢ Spending alerts: <span className="font-semibold">{parentSpendingAlerts ? 'On' : 'Off'}</span></p>
           </div>
         </div>
 
@@ -2994,7 +2995,7 @@ export default function DashboardPage() {
           <div className="space-y-2 font-inter text-gray-700">
             {parentChildren.map((child) => (
               <p key={child.id}>
-                • {child.name}: <span className="font-semibold">{formatPHP(child.balance)}</span> balance, {child.withdrawalsThisWeek} withdrawals
+                Ã¢â‚¬Â¢ {child.name}: <span className="font-semibold">{formatPHP(child.balance)}</span> balance, {child.withdrawalsThisWeek} withdrawals
               </p>
             ))}
           </div>
@@ -3010,7 +3011,7 @@ export default function DashboardPage() {
 
         <div className="dashboard-list-item space-y-3">
           <div>
-            <p className="font-inter font-semibold text-gray-800">📶 Device WiFi</p>
+            <p className="font-inter font-semibold text-gray-800">Ã°Å¸â€œÂ¶ Device WiFi</p>
             <p className="text-sm text-gray-600 font-inter">
               Change the WiFi network the ATM device connects to. The new credentials are sent to the device on its next poll (~10 seconds) and saved permanently.
             </p>
@@ -3072,7 +3073,7 @@ export default function DashboardPage() {
               }}
               className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
             >
-              {wifiSaving ? 'Sending…' : 'Send to Device'}
+              {wifiSaving ? 'SendingÃ¢â‚¬Â¦' : 'Send to Device'}
             </button>
             {wifiMessage && (
               <span className={`text-sm font-inter ${wifiMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
@@ -3138,7 +3139,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="border-t border-blue-200 pt-6">
-          <h4 className="text-lg font-sora font-bold text-blue-700 mb-3">👶 Create Kid Accounts</h4>
+          <h4 className="text-lg font-sora font-bold text-blue-700 mb-3">Ã°Å¸â€˜Â¶ Create Kid Accounts</h4>
           <div className="rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-cyan-50 p-4 mb-4 shadow-sm">
             <p className="text-sm text-blue-800 font-inter mb-4">
               Create accounts for your children. They will use these credentials to log in and access their savings dashboard.
@@ -3190,7 +3191,7 @@ export default function DashboardPage() {
                 type="text"
                 value={newKidSecurityAnswer}
                 onChange={(e) => setNewKidSecurityAnswer(e.target.value)}
-                placeholder="🔐 Answer to security question"
+                placeholder="Ã°Å¸â€Â Answer to security question"
                 className="dashboard-field w-full px-4 py-2"
               />
               <button
@@ -3224,7 +3225,7 @@ export default function DashboardPage() {
                   })
                   if (!res.ok) {
                     const data = await res.json().catch(() => ({ error: 'Failed to create kid account' }))
-                    alert(`❌ ${data.error ?? 'Failed to create kid account'}`)
+                    alert(`Ã¢ÂÅ’ ${data.error ?? 'Failed to create kid account'}`)
                     return
                   }
 
@@ -3246,11 +3247,11 @@ export default function DashboardPage() {
                   setNewKidSecurityQuestion("What's your favorite pet?")
                   setNewKidSecurityAnswer('')
                   setNewKidCustomQuestion('')
-                  alert(`✅ Kid account "${username}" created successfully in database!`)
+                  alert(`Ã¢Å“â€¦ Kid account "${username}" created successfully in database!`)
                 }}
                 className="dashboard-action-primary w-full py-2 px-4"
               >
-                ➕ Create Kid Account
+                Ã¢Å¾â€¢ Create Kid Account
               </button>
             </div>
           </div>
@@ -3262,7 +3263,7 @@ export default function DashboardPage() {
                 {validKidAccounts.map((username) => (
                   <div key={username} className="flex items-center justify-between bg-white rounded-lg p-3 border border-sky-100 shadow-sm">
                     <div className="flex-1">
-                      <p className="font-inter font-bold text-gray-800">👶 {username}</p>
+                      <p className="font-inter font-bold text-gray-800">Ã°Å¸â€˜Â¶ {username}</p>
                       <p className="text-sm text-gray-600 font-inter">Balance: {formatPHP(kidBalances[username] || 0)}</p>
                     </div>
                     <button
@@ -3274,7 +3275,7 @@ export default function DashboardPage() {
                           })
                           if (!res.ok) {
                             const data = await res.json().catch(() => ({ error: 'Failed to delete kid account' }))
-                            alert(`❌ ${data.error ?? 'Failed to delete kid account'}`)
+                            alert(`Ã¢ÂÅ’ ${data.error ?? 'Failed to delete kid account'}`)
                             return
                           }
 
@@ -3289,7 +3290,7 @@ export default function DashboardPage() {
                               }, {})
                             )
                           }
-                          alert(`✅ Kid account "${username}" has been deleted from database.`)
+                          alert(`Ã¢Å“â€¦ Kid account "${username}" has been deleted from database.`)
                         }
                       }}
                       className="text-red-600 hover:text-red-700 font-inter font-semibold text-sm transition-colors"
@@ -3398,9 +3399,9 @@ export default function DashboardPage() {
         <div className="absolute top-20 left-10 w-72 h-72 bg-blue-400 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float"></div>
         <div className="absolute top-40 right-20 w-96 h-96 bg-cyan-300 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float" style={{ animationDelay: '0.4s' }}></div>
         <div className="absolute -bottom-8 left-1/3 w-80 h-80 bg-teal-400 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-float" style={{ animationDelay: '0.8s' }}></div>
-        <div className="absolute top-1/4 left-1/4 text-6xl opacity-20 animate-bounce-slow">💰</div>
-        <div className="absolute bottom-1/4 right-1/3 text-5xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.35s' }}>🪙</div>
-        <div className="absolute top-[62%] left-[18%] text-4xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.65s' }}>💵</div>
+        <div className="absolute top-1/4 left-1/4 text-6xl opacity-20 animate-bounce-slow">Ã°Å¸â€™Â°</div>
+        <div className="absolute bottom-1/4 right-1/3 text-5xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.35s' }}>Ã°Å¸Âªâ„¢</div>
+        <div className="absolute top-[62%] left-[18%] text-4xl opacity-20 animate-bounce-slow" style={{ animationDelay: '0.65s' }}>Ã°Å¸â€™Âµ</div>
       </div>
 
       <div className="relative z-10 min-h-screen flex items-center justify-center p-3 sm:p-4 md:p-6">
@@ -3417,7 +3418,7 @@ export default function DashboardPage() {
               <h1 className="text-4xl font-sora font-black leading-none tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-700 via-sky-600 to-teal-500 drop-shadow-[0_2px_6px_rgba(17,83,145,0.2)]">
                 C.A.S.H.
               </h1>
-              <p className="mt-2 text-[13px] text-slate-700/95 font-inter font-semibold tracking-wide">Learn • Save • Achieve</p>
+              <p className="mt-2 text-[13px] text-slate-700/95 font-inter font-semibold tracking-wide">Learn Ã¢â‚¬Â¢ Save Ã¢â‚¬Â¢ Achieve</p>
             </div>
 
             <div className="mb-6 rounded-2xl border-2 border-blue-200 bg-white/80 p-3.5 shadow-sm">
@@ -3487,7 +3488,7 @@ export default function DashboardPage() {
                   {role === 'kid' ? 'Kid View' : 'Parent View'}
                 </span>
               </div>
-              <p className="mt-1 mb-3 text-[11px] font-inter font-semibold text-slate-700/90 tracking-wide">Learn • Save • Achieve</p>
+              <p className="mt-1 mb-3 text-[11px] font-inter font-semibold text-slate-700/90 tracking-wide">Learn Ã¢â‚¬Â¢ Save Ã¢â‚¬Â¢ Achieve</p>
 
               <div className="flex gap-1.5">
               {visibleMenuItems.map((item) => (
@@ -3526,7 +3527,7 @@ export default function DashboardPage() {
 
       {depositToast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-green-500 text-white px-4 py-3 sm:px-6 sm:py-4 rounded-2xl shadow-2xl font-sora font-bold text-sm sm:text-xl flex items-center gap-2 sm:gap-3 animate-bounce max-w-[90vw] text-center">
-          <span>💰</span>
+          <span>Ã°Å¸â€™Â°</span>
           <span>{depositToast}</span>
         </div>
       )}
@@ -3556,7 +3557,7 @@ export default function DashboardPage() {
 
               <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
                 <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-                {pendingDepositReceived > 0 ? 'Money detected — keep inserting or wait for timer.' : 'Waiting for coins or bills…'}
+                {pendingDepositReceived > 0 ? 'Money detected Ã¢â‚¬â€ keep inserting or wait for timer.' : 'Waiting for coins or billsÃ¢â‚¬Â¦'}
               </div>
 
               <button
@@ -3594,11 +3595,11 @@ export default function DashboardPage() {
         <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 space-y-4 text-center">
             <div className="text-7xl">
-              {withdrawProgress.phase === 'locking' && '🦊'}
-              {withdrawProgress.phase === 'sending' && '🐼'}
-              {withdrawProgress.phase === 'dispensing' && '🐰'}
-              {withdrawProgress.phase === 'done' && '🎉'}
-              {withdrawProgress.phase === 'error' && '😿'}
+              {withdrawProgress.phase === 'locking' && 'Ã°Å¸Â¦Å '}
+              {withdrawProgress.phase === 'sending' && 'Ã°Å¸ÂÂ¼'}
+              {withdrawProgress.phase === 'dispensing' && 'Ã°Å¸ÂÂ°'}
+              {withdrawProgress.phase === 'done' && 'Ã°Å¸Å½â€°'}
+              {withdrawProgress.phase === 'error' && 'Ã°Å¸ËœÂ¿'}
             </div>
 
             <h3 className="text-2xl font-sora font-bold text-blue-700">
@@ -3665,7 +3666,7 @@ export default function DashboardPage() {
 
             <div className="flex items-center gap-2 text-sm text-gray-500 font-inter">
               <span className="inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
-              {pendingDepositReceived > 0 ? 'Money detected — keep inserting or wait for timer.' : 'Waiting for coins or bills…'}
+              {pendingDepositReceived > 0 ? 'Money detected Ã¢â‚¬â€ keep inserting or wait for timer.' : 'Waiting for coins or billsÃ¢â‚¬Â¦'}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-2 pt-1">
