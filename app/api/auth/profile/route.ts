@@ -17,6 +17,10 @@ type AccountEmailRow = {
   email: string | null
 }
 
+type ParentKidLinkRow = {
+  parent_username: string
+}
+
 async function ensureAccountEmailTable(db: DbClient) {
   await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "AccountEmail" (
@@ -30,6 +34,31 @@ async function ensureAccountEmailTable(db: DbClient) {
         ON DELETE CASCADE
     )
   `)
+}
+
+async function ensureParentKidLinkTable(db: DbClient) {
+  await db.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "ParentKidLink" (
+      parent_username TEXT NOT NULL,
+      kid_username TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (parent_username, kid_username)
+    )
+  `)
+}
+
+async function getParentUsernameForKid(db: DbClient, kidUsername: string): Promise<string> {
+  const kid = kidUsername.trim().toLowerCase()
+  if (!kid) {
+    return ''
+  }
+
+  await ensureParentKidLinkTable(db)
+  const rows = await db.$queryRawUnsafe<ParentKidLinkRow[]>(
+    'SELECT parent_username FROM "ParentKidLink" WHERE kid_username = $1 LIMIT 1',
+    kid
+  )
+  return rows[0]?.parent_username ?? ''
 }
 
 async function getAccountEmail(db: DbClient, accountId: string): Promise<string> {
@@ -81,6 +110,9 @@ export async function GET(request: Request) {
   }
 
   const email = await getAccountEmail(prisma, account.id)
+  const parentUsername = account.role === 'kid'
+    ? await getParentUsernameForKid(prisma, account.username)
+    : ''
 
   return NextResponse.json({
     account: {
@@ -88,6 +120,7 @@ export async function GET(request: Request) {
       role: account.role,
       email,
       securityQuestion: account.securityQuestion ?? '',
+      parentUsername,
     },
   })
 }
@@ -240,12 +273,16 @@ export async function PATCH(request: Request) {
       const email = requestedEmail !== undefined
         ? requestedEmail
         : await getAccountEmail(tx, updatedAccount.id)
+      const parentUsername = updatedAccount.role === 'kid'
+        ? await getParentUsernameForKid(tx, updatedAccount.username)
+        : ''
 
       return {
         username: updatedAccount.username,
         role: updatedAccount.role,
         securityQuestion: updatedAccount.securityQuestion ?? '',
         email,
+        parentUsername,
       }
     })
 

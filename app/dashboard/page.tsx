@@ -386,6 +386,7 @@ export default function DashboardPage() {
   const [profileEmail, setProfileEmail] = useState('')
   const [profileSecurityQuestion, setProfileSecurityQuestion] = useState('')
   const [profileNewPassword, setProfileNewPassword] = useState('')
+  const [kidParentUsername, setKidParentUsername] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileMessage, setProfileMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const kidLastSeenDepositIdRef = useRef(0)
@@ -449,6 +450,7 @@ export default function DashboardPage() {
       sessionStorage.setItem('cash_username', updated.username)
       setProfileEmail(updated.email ?? '')
       setProfileSecurityQuestion(updated.securityQuestion ?? '')
+      setKidParentUsername(updated.parentUsername ?? '')
       setProfileNewPassword('')
       setProfileMessage({ kind: 'ok', text: 'Profile updated successfully.' })
     } catch {
@@ -532,6 +534,7 @@ export default function DashboardPage() {
           if (profileData.account) {
             setProfileEmail(profileData.account.email ?? '')
             setProfileSecurityQuestion(profileData.account.securityQuestion ?? '')
+            setKidParentUsername(profileData.account.parentUsername ?? '')
           }
         }
       } catch {
@@ -2500,6 +2503,7 @@ export default function DashboardPage() {
           </div>
           <div className="space-y-1 text-gray-700">
             <p><span className="font-semibold">Role:</span> Kid</p>
+            <p><span className="font-semibold">Parent Account:</span> {kidParentUsername ? kidParentUsername : 'Not linked yet'}</p>
             <p><span className="font-semibold">Title:</span> {selectedCharacter.title}</p>
           </div>
         </div>
