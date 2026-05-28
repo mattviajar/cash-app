@@ -87,7 +87,7 @@ type ProfileState = {
   username: string
   email: string
   password: string
-  securityQuestion: string
+  securityAnswer: string
 }
 
 const withdrawDenominations = [
@@ -349,6 +349,8 @@ export default function DashboardPage() {
   const [wifiMessage, setWifiMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [newGoalName, setNewGoalName] = useState('')
   const [newGoalTarget, setNewGoalTarget] = useState('')
+  const [newParentGoalName, setNewParentGoalName] = useState('')
+  const [newParentGoalTarget, setNewParentGoalTarget] = useState('')
   const [kidCharacter, setKidCharacter] = useState('astronaut')
   const [kidName, setKidName] = useState('')
   const [parentName, setParentName] = useState('')
@@ -357,7 +359,7 @@ export default function DashboardPage() {
     username: '',
     email: '',
     password: '',
-    securityQuestion: '',
+    securityAnswer: '',
   })
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileMessage, setProfileMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -449,6 +451,15 @@ export default function DashboardPage() {
   const kidGoals = useMemo(() => {
     return withComputedGoalSavings(kidGoalInputs, balance)
   }, [kidGoalInputs, balance])
+
+  const parentGoalInputs = useMemo(() => {
+    if (!parentName) return initialKidGoals
+    return kidGoalsByAccount[parentName] ?? initialKidGoals
+  }, [kidGoalsByAccount, parentName])
+
+  const parentOwnGoals = useMemo(() => {
+    return withComputedGoalSavings(parentGoalInputs, parentBalance)
+  }, [parentGoalInputs, parentBalance])
 
   useEffect(() => {
     const hydrateSession = async () => {
@@ -623,7 +634,7 @@ export default function DashboardPage() {
           account?: {
             username?: string
             email?: string
-            securityQuestion?: string
+            securityAnswer?: string
           }
         }
 
@@ -633,7 +644,7 @@ export default function DashboardPage() {
           username: data.account.username ?? username,
           email: data.account.email ?? '',
           password: '',
-          securityQuestion: data.account.securityQuestion ?? '',
+          securityAnswer: data.account.securityAnswer ?? '',
         })
       } catch {
         // Keep the editor usable with whatever local values already exist.
@@ -1457,15 +1468,15 @@ export default function DashboardPage() {
     const username = profileState.username.trim().toLowerCase()
     const email = profileState.email.trim().toLowerCase()
     const password = profileState.password
-    const securityQuestion = profileState.securityQuestion.trim()
+    const securityAnswer = profileState.securityAnswer.trim()
 
     if (!username) {
       setProfileMessage({ kind: 'err', text: 'Username is required.' })
       return
     }
 
-    if (!securityQuestion) {
-      setProfileMessage({ kind: 'err', text: 'Security question cannot be empty.' })
+    if (!securityAnswer) {
+      setProfileMessage({ kind: 'err', text: 'Security answer cannot be empty.' })
       return
     }
 
@@ -1480,7 +1491,7 @@ export default function DashboardPage() {
           username,
           email,
           password,
-          securityQuestion,
+          securityAnswer,
         }),
       })
 
@@ -1490,7 +1501,7 @@ export default function DashboardPage() {
         account?: {
           username?: string
           email?: string
-          securityQuestion?: string
+          securityAnswer?: string
           role?: Role
           parentUsername?: string
         }
@@ -1503,14 +1514,14 @@ export default function DashboardPage() {
 
       const nextUsername = data.account.username ?? username
       const nextEmail = data.account.email ?? email
-      const nextSecurityQuestion = data.account.securityQuestion ?? securityQuestion
+      const nextSecurityAnswer = data.account.securityAnswer ?? securityAnswer
 
       setProfileState((prev) => ({
         ...prev,
         username: nextUsername,
         email: nextEmail,
         password: '',
-        securityQuestion: nextSecurityQuestion,
+        securityAnswer: nextSecurityAnswer,
       }))
 
       if ((data.account.role ?? role) === 'kid') {
@@ -2105,6 +2116,67 @@ export default function DashboardPage() {
     setNewGoalTarget('')
   }
 
+  const handleAddParentGoal = (e: React.FormEvent) => {
+    e.preventDefault()
+    const cleanedName = newParentGoalName.trim()
+    const targetValue = Number(newParentGoalTarget)
+    if (!parentName || !cleanedName || !Number.isFinite(targetValue) || targetValue <= 0) {
+      return
+    }
+
+    const newGoal: Goal = {
+      id: Date.now(),
+      name: cleanedName,
+      saved: 0,
+      target: Number(targetValue.toFixed(2)),
+    }
+
+    setKidGoalsByAccount((prev) => ({
+      ...prev,
+      [parentName]: [...(prev[parentName] ?? []), newGoal],
+    }))
+    setNewParentGoalName('')
+    setNewParentGoalTarget('')
+  }
+
+  const requestGoalWithdrawal = async (goal: Goal) => {
+    if (!kidName) return
+
+    const amount = Number(goal.target)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return
+    }
+
+    if (balance < amount) {
+      alert(`Not enough balance for this goal. Required: ${formatPHP(amount)}, Available: ${formatPHP(balance)}`)
+      return
+    }
+
+    const createRes = await fetch('/api/pending-withdrawals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        child: kidName,
+        amount,
+        note: `Goal withdrawal: ${goal.name}`,
+      }),
+    })
+
+    if (!createRes.ok) {
+      const data = await createRes.json().catch(() => ({ error: 'Failed to create withdrawal request' }))
+      alert(`Error: ${data.error ?? 'Failed to create withdrawal request'}`)
+      return
+    }
+
+    const pendingRes = await fetch(`/api/pending-withdrawals?child=${encodeURIComponent(kidName)}`, { cache: 'no-store' })
+    if (pendingRes.ok) {
+      const pendingData = await pendingRes.json() as { pending: PendingWithdrawal[] }
+      setPendingWithdrawals(pendingData.pending)
+    }
+
+    alert(`Request sent: ${formatPHP(amount)} for goal "${goal.name}" is pending parent approval.`)
+  }
+
   const openKidDepositModal = async () => {
     const lock = await acquireDeviceLock(kidName, 'deposit')
     if (!lock.ok) {
@@ -2371,21 +2443,6 @@ export default function DashboardPage() {
           />
           <button type="submit" className="btn-primary">Add Goal</button>
         </form>
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveMenu('dashboard')
-              setKidQuickSection('withdraw')
-            }}
-            className="dashboard-action-secondary px-4 py-2"
-          >
-            Withdraw for Goal
-          </button>
-          <p className="text-xs font-inter text-gray-600">
-            Withdrawals update your balance, then Total Saved, Goal Target, and Completion refresh automatically.
-          </p>
-        </div>
       </div>
 
       <div className="glass-card">
@@ -2397,16 +2454,26 @@ export default function DashboardPage() {
             const goalMet = balance >= goal.target
             return (
               <div key={goal.id} className={`rounded-xl p-4 border-2 ${goalMet ? 'bg-emerald-50 border-emerald-300 shadow-[0_8px_22px_rgba(16,185,129,0.2)]' : 'bg-white/70 border-transparent'}`}>
-                <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
+                <div className="flex items-start justify-between gap-3 text-sm font-inter font-semibold text-gray-700 mb-1">
                   <span>{goal.name}</span>
-                  <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
+                  <div className="flex items-center gap-2">
+                    <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
+                    <button
+                      type="button"
+                      onClick={() => { void requestGoalWithdrawal(goal) }}
+                      disabled={balance < goal.target}
+                      className="dashboard-action-secondary px-3 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Withdraw
+                    </button>
+                  </div>
                 </div>
                 <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-2">
                   <div className={`h-full ${goalMet ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-blue-600 to-teal-500'}`} style={{ width: `${percent}%` }}></div>
                 </div>
                 <div className="mt-3 flex items-center justify-between text-xs font-inter text-gray-600">
                   <span>{goalMet ? 'Goal reached' : `${percent}% complete`}</span>
-                  <span>{formatPHP(remaining)} to go</span>
+                  <span>{balance < goal.target ? `Need ${formatPHP(goal.target - balance)} more balance to request` : `${formatPHP(remaining)} to go`}</span>
                 </div>
               </div>
             )
@@ -2654,9 +2721,9 @@ export default function DashboardPage() {
           />
           <input
             type="text"
-            value={profileState.securityQuestion}
-            onChange={(e) => setProfileState((prev) => ({ ...prev, securityQuestion: e.target.value }))}
-            placeholder="Security Question"
+            value={profileState.securityAnswer}
+            onChange={(e) => setProfileState((prev) => ({ ...prev, securityAnswer: e.target.value }))}
+            placeholder="Security Question Answer"
             className="dashboard-field w-full"
           />
           <button
@@ -2917,25 +2984,98 @@ export default function DashboardPage() {
   )
 
   const parentGoalsView = (
-    <section className="glass-card">
-      <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Kids Goal Progress</h3>
-      <div className="space-y-5">
-        {parentGoals.length === 0 ? (
-          <p className="font-inter text-gray-700">No goals created yet.</p>
-        ) : parentGoals.map((goal) => {
-          const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
-          return (
-            <div key={goal.key}>
-              <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
-                <span>{goal.child} • {goal.name}</span>
-                <span>{percent}%</span>
+    <section className="space-y-6">
+      <div className="grid md:grid-cols-3 gap-4">
+        <div className="glass-card text-center">
+          <p className="text-gray-600 font-inter">Your Goal Saved</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">
+            {formatPHP(parentOwnGoals.reduce((sum, goal) => sum + goal.saved, 0))}
+          </p>
+        </div>
+        <div className="glass-card text-center">
+          <p className="text-gray-600 font-inter">Your Goal Target</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">
+            {formatPHP(parentOwnGoals.reduce((sum, goal) => sum + goal.target, 0))}
+          </p>
+        </div>
+        <div className="glass-card text-center">
+          <p className="text-gray-600 font-inter">Your Completion</p>
+          <p className="text-4xl font-sora font-black text-blue-700 mt-2">
+            {(() => {
+              const saved = parentOwnGoals.reduce((sum, goal) => sum + goal.saved, 0)
+              const target = parentOwnGoals.reduce((sum, goal) => sum + goal.target, 0)
+              return `${target > 0 ? Math.round((saved / target) * 100) : 0}%`
+            })()}
+          </p>
+        </div>
+      </div>
+
+      <div className="glass-card">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Add Your Goal</h3>
+        <form onSubmit={handleAddParentGoal} className="grid gap-3 md:grid-cols-3">
+          <input
+            type="text"
+            value={newParentGoalName}
+            onChange={(e) => setNewParentGoalName(e.target.value)}
+            placeholder="Goal name"
+            className="px-4 py-3 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80"
+          />
+          <input
+            type="number"
+            min="1"
+            step="0.01"
+            value={newParentGoalTarget}
+            onChange={(e) => setNewParentGoalTarget(e.target.value)}
+            placeholder="Target amount"
+            className="px-4 py-3 rounded-xl border-2 border-blue-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none font-inter bg-white/80"
+          />
+          <button type="submit" className="btn-primary">Add Goal</button>
+        </form>
+      </div>
+
+      <div className="glass-card">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Your Goals</h3>
+        <div className="space-y-4">
+          {parentOwnGoals.length === 0 ? (
+            <p className="font-inter text-gray-700">No parent goals yet.</p>
+          ) : parentOwnGoals.map((goal) => {
+            const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
+            const goalMet = parentBalance >= goal.target
+            return (
+              <div key={goal.id} className={`rounded-xl p-4 border-2 ${goalMet ? 'bg-emerald-50 border-emerald-300 shadow-[0_8px_22px_rgba(16,185,129,0.2)]' : 'bg-white/70 border-transparent'}`}>
+                <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
+                  <span>{goal.name}</span>
+                  <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
+                </div>
+                <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-2">
+                  <div className={`h-full ${goalMet ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-blue-600 to-teal-500'}`} style={{ width: `${percent}%` }}></div>
+                </div>
               </div>
-              <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percent}%` }}></div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="glass-card">
+        <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700 mb-4">Kids Goal Progress</h3>
+        <div className="space-y-5">
+          {parentGoals.length === 0 ? (
+            <p className="font-inter text-gray-700">No goals created yet.</p>
+          ) : parentGoals.map((goal) => {
+            const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
+            return (
+              <div key={goal.key}>
+                <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
+                  <span>{goal.child} • {goal.name}</span>
+                  <span>{percent}%</span>
+                </div>
+                <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden">
+                  <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percent}%` }}></div>
+                </div>
               </div>
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
     </section>
   )
@@ -3437,9 +3577,9 @@ export default function DashboardPage() {
         />
         <input
           type="text"
-          value={profileState.securityQuestion}
-          onChange={(e) => setProfileState((prev) => ({ ...prev, securityQuestion: e.target.value }))}
-          placeholder="Security Question"
+          value={profileState.securityAnswer}
+          onChange={(e) => setProfileState((prev) => ({ ...prev, securityAnswer: e.target.value }))}
+          placeholder="Security Question Answer"
           className="dashboard-field w-full"
         />
         <button

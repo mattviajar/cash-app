@@ -101,7 +101,7 @@ export async function GET(request: Request) {
       id: true,
       username: true,
       role: true,
-      securityQuestion: true,
+      securityAnswer: true,
     },
   })
 
@@ -119,7 +119,7 @@ export async function GET(request: Request) {
       username: account.username,
       role: account.role,
       email,
-      securityQuestion: account.securityQuestion ?? '',
+      securityAnswer: account.securityAnswer ?? '',
       parentUsername,
     },
   })
@@ -149,14 +149,18 @@ export async function PATCH(request: Request) {
   const requestedPassword = typeof payload.password === 'string'
     ? payload.password
     : undefined
+  const requestedSecurityAnswer = typeof payload.securityAnswer === 'string'
+    ? payload.securityAnswer.trim()
+    : undefined
   const requestedSecurityQuestion = typeof payload.securityQuestion === 'string'
-    ? payload.securityQuestion.trim()
+    ? payload.securityQuestion.trim() // backward-compat for older clients
     : undefined
 
   if (
     requestedUsername === undefined
     && requestedEmail === undefined
     && requestedPassword === undefined
+    && requestedSecurityAnswer === undefined
     && requestedSecurityQuestion === undefined
   ) {
     return NextResponse.json({ error: 'No updates provided' }, { status: 400 })
@@ -170,8 +174,9 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: 'Password must be at least 4 characters' }, { status: 400 })
   }
 
-  if (requestedSecurityQuestion !== undefined && requestedSecurityQuestion.length === 0) {
-    return NextResponse.json({ error: 'Security question cannot be empty' }, { status: 400 })
+  const nextSecurityAnswerInput = requestedSecurityAnswer ?? requestedSecurityQuestion
+  if (nextSecurityAnswerInput !== undefined && nextSecurityAnswerInput.length === 0) {
+    return NextResponse.json({ error: 'Security answer cannot be empty' }, { status: 400 })
   }
 
   if (requestedEmail !== undefined && !isValidEmail(requestedEmail)) {
@@ -189,7 +194,7 @@ export async function PATCH(request: Request) {
           id: true,
           username: true,
           role: true,
-          securityQuestion: true,
+          securityAnswer: true,
         },
       })
 
@@ -212,7 +217,7 @@ export async function PATCH(request: Request) {
       const updateData: {
         username?: string
         passwordHash?: string
-        securityQuestion?: string
+        securityAnswer?: string
       } = {}
 
       if (nextUsername !== account.username) {
@@ -223,8 +228,8 @@ export async function PATCH(request: Request) {
         updateData.passwordHash = hashPassword(requestedPassword)
       }
 
-      if (requestedSecurityQuestion !== undefined) {
-        updateData.securityQuestion = requestedSecurityQuestion
+      if (nextSecurityAnswerInput !== undefined) {
+        updateData.securityAnswer = nextSecurityAnswerInput
       }
 
       const updatedAccount = Object.keys(updateData).length > 0
@@ -235,7 +240,7 @@ export async function PATCH(request: Request) {
             id: true,
             username: true,
             role: true,
-            securityQuestion: true,
+            securityAnswer: true,
           },
         })
         : account
@@ -280,7 +285,7 @@ export async function PATCH(request: Request) {
       return {
         username: updatedAccount.username,
         role: updatedAccount.role,
-        securityQuestion: updatedAccount.securityQuestion ?? '',
+        securityAnswer: updatedAccount.securityAnswer ?? '',
         email,
         parentUsername,
       }
