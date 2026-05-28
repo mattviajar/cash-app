@@ -68,6 +68,13 @@ type DeviceLockStatus = {
   expiresAt: string | null
 }
 
+type ProfileAccount = {
+  username: string
+  role: Role
+  email: string
+  securityQuestion: string
+}
+
 type DepositDebugState = {
   kidSince: number
   parentSince: number
@@ -376,6 +383,11 @@ export default function DashboardPage() {
   })
   const [kidDepositModalOpen, setKidDepositModalOpen] = useState(false)
   const [depositCountdown, setDepositCountdown] = useState(DEPOSIT_COUNTDOWN_SECONDS)
+  const [profileEmail, setProfileEmail] = useState('')
+  const [profileSecurityQuestion, setProfileSecurityQuestion] = useState('')
+  const [profileNewPassword, setProfileNewPassword] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMessage, setProfileMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const kidLastSeenDepositIdRef = useRef(0)
   const kidLastSeenDepositEventIdRef = useRef(0)
   const parentLastSeenDepositIdRef = useRef(0)
@@ -390,6 +402,60 @@ export default function DashboardPage() {
     }
     sessionStorage.clear()
     router.replace('/login')
+  }
+
+  const saveProfile = async () => {
+    const activeUsername = role === 'kid' ? kidName : parentName
+    const normalizedUsername = activeUsername.trim().toLowerCase()
+    const trimmedEmail = profileEmail.trim().toLowerCase()
+    const trimmedQuestion = profileSecurityQuestion.trim()
+
+    if (!normalizedUsername) {
+      setProfileMessage({ kind: 'err', text: 'Username is required.' })
+      return
+    }
+    if (!trimmedQuestion) {
+      setProfileMessage({ kind: 'err', text: 'Security question is required.' })
+      return
+    }
+
+    setProfileSaving(true)
+    setProfileMessage(null)
+
+    try {
+      const res = await fetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: normalizedUsername,
+          email: trimmedEmail,
+          securityQuestion: trimmedQuestion,
+          password: profileNewPassword,
+        }),
+      })
+
+      const data = await res.json().catch(() => ({})) as { error?: string; account?: ProfileAccount }
+      if (!res.ok || !data.account) {
+        setProfileMessage({ kind: 'err', text: data.error ?? 'Failed to update profile.' })
+        return
+      }
+
+      const updated = data.account
+      if (updated.role === 'kid') {
+        setKidName(updated.username)
+      } else {
+        setParentName(updated.username)
+      }
+      sessionStorage.setItem('cash_username', updated.username)
+      setProfileEmail(updated.email ?? '')
+      setProfileSecurityQuestion(updated.securityQuestion ?? '')
+      setProfileNewPassword('')
+      setProfileMessage({ kind: 'ok', text: 'Profile updated successfully.' })
+    } catch {
+      setProfileMessage({ kind: 'err', text: 'Network error while updating profile.' })
+    } finally {
+      setProfileSaving(false)
+    }
   }
 
   const refreshInventory = async () => {
@@ -458,6 +524,19 @@ export default function DashboardPage() {
       }
 
       setKidGoalsByAccount(loadedGoalsByAccount)
+
+      try {
+        const profileRes = await fetch('/api/auth/profile', { cache: 'no-store' })
+        if (profileRes.ok) {
+          const profileData = await profileRes.json() as { account?: ProfileAccount }
+          if (profileData.account) {
+            setProfileEmail(profileData.account.email ?? '')
+            setProfileSecurityQuestion(profileData.account.securityQuestion ?? '')
+          }
+        }
+      } catch {
+        // Keep dashboard usable even if profile endpoint is temporarily unavailable.
+      }
 
       setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
 
@@ -2427,6 +2506,53 @@ export default function DashboardPage() {
       </div>
 
       <div className="dashboard-panel">
+        <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Edit Login Details</h4>
+        <div className="space-y-3">
+          <input
+            type="text"
+            value={kidName}
+            onChange={(e) => setKidName(e.target.value)}
+            placeholder="Username"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="email"
+            value={profileEmail}
+            onChange={(e) => setProfileEmail(e.target.value)}
+            placeholder="Gmail / Email"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="text"
+            value={profileSecurityQuestion}
+            onChange={(e) => setProfileSecurityQuestion(e.target.value)}
+            placeholder="Security Question"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="password"
+            value={profileNewPassword}
+            onChange={(e) => setProfileNewPassword(e.target.value)}
+            placeholder="New Password (leave blank to keep current)"
+            className="dashboard-field w-full"
+          />
+          <button
+            type="button"
+            onClick={() => { void saveProfile() }}
+            disabled={profileSaving}
+            className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
+          >
+            {profileSaving ? 'Saving...' : 'Save Profile'}
+          </button>
+          {profileMessage && (
+            <p className={`text-sm font-inter ${profileMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+              {profileMessage.text}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="dashboard-panel">
         <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Choose Your Character</h4>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           {characterOptions.map((option) => (
@@ -3184,6 +3310,49 @@ export default function DashboardPage() {
         <p><span className="font-semibold">Name:</span> Parent Account</p>
         <p><span className="font-semibold">Role:</span> Parent</p>
         <p><span className="font-semibold">Permissions:</span> View balances, approve withdrawals, manage settings</p>
+      </div>
+      <div className="dashboard-list-item space-y-3">
+        <input
+          type="text"
+          value={parentName}
+          onChange={(e) => setParentName(e.target.value)}
+          placeholder="Username"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="email"
+          value={profileEmail}
+          onChange={(e) => setProfileEmail(e.target.value)}
+          placeholder="Gmail / Email"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="text"
+          value={profileSecurityQuestion}
+          onChange={(e) => setProfileSecurityQuestion(e.target.value)}
+          placeholder="Security Question"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="password"
+          value={profileNewPassword}
+          onChange={(e) => setProfileNewPassword(e.target.value)}
+          placeholder="New Password (leave blank to keep current)"
+          className="dashboard-field w-full"
+        />
+        <button
+          type="button"
+          onClick={() => { void saveProfile() }}
+          disabled={profileSaving}
+          className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
+        >
+          {profileSaving ? 'Saving...' : 'Save Profile'}
+        </button>
+        {profileMessage && (
+          <p className={`text-sm font-inter ${profileMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+            {profileMessage.text}
+          </p>
+        )}
       </div>
     </section>
   )
