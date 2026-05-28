@@ -103,11 +103,11 @@ const withdrawDenominations = [
 type WithdrawDenominationKey = typeof withdrawDenominations[number]['field']
 
 const menuItems: Array<{ key: MenuKey; label: string; icon: string }> = [
-  { key: 'dashboard', label: 'Dashboard', icon: 'DB' },
-  { key: 'progress', label: 'Progress', icon: 'PG' },
-  { key: 'transactions', label: 'Transactions', icon: 'TX' },
-  { key: 'settings', label: 'Settings', icon: 'ST' },
-  { key: 'profile', label: 'Profile', icon: 'PF' },
+  { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
+  { key: 'progress', label: 'Progress', icon: '🎯' },
+  { key: 'transactions', label: 'Transactions', icon: '🧾' },
+  { key: 'settings', label: 'Settings', icon: '⚙' },
+  { key: 'profile', label: 'Profile', icon: '👤' },
 ]
 
 const initialKidGoals: Goal[] = []
