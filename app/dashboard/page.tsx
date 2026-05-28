@@ -16,7 +16,7 @@ import {
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
 type Role = 'kid' | 'parent'
-type MenuKey = 'dashboard' | 'transactions' | 'settings' | 'profile'
+type MenuKey = 'dashboard' | 'progress' | 'transactions' | 'settings' | 'profile'
 type KidQuickSection = 'none' | 'withdraw' | 'activity'
 type ParentQuickSection = 'none' | 'deposit' | 'withdraw' | 'activity'
 type HistoryKind = 'withdrawal' | 'hardware'
@@ -116,6 +116,7 @@ type WithdrawDenominationKey = typeof withdrawDenominations[number]['field']
 
 const menuItems: Array<{ key: MenuKey; label: string; icon: string }> = [
   { key: 'dashboard', label: 'Dashboard', icon: 'DB' },
+  { key: 'progress', label: 'Progress', icon: 'PG' },
   { key: 'transactions', label: 'Transactions', icon: 'TX' },
   { key: 'settings', label: 'Settings', icon: 'ST' },
   { key: 'profile', label: 'Profile', icon: 'PF' },
@@ -2420,17 +2421,18 @@ export default function DashboardPage() {
           {kidGoals.map((goal) => {
             const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
             const remaining = goal.target - goal.saved
+            const goalMet = balance >= goal.target
             return (
-              <div key={goal.id} className="bg-white/70 rounded-xl p-4">
+              <div key={goal.id} className={`rounded-xl p-4 border-2 ${goalMet ? 'bg-emerald-50 border-emerald-300 shadow-[0_8px_22px_rgba(16,185,129,0.2)]' : 'bg-white/70 border-transparent'}`}>
                 <div className="flex justify-between text-sm font-inter font-semibold text-gray-700 mb-1">
                   <span>{goal.name}</span>
                   <span>{formatPHP(goal.saved)} / {formatPHP(goal.target)}</span>
                 </div>
                 <div className="w-full h-3 bg-white/60 rounded-full overflow-hidden mt-2">
-                  <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percent}%` }}></div>
+                  <div className={`h-full ${goalMet ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-blue-600 to-teal-500'}`} style={{ width: `${percent}%` }}></div>
                 </div>
                 <div className="mt-3 flex items-center justify-between text-xs font-inter text-gray-600">
-                  <span>{percent}% complete</span>
+                  <span>{goalMet ? 'Goal reached' : `${percent}% complete`}</span>
                   <span>{formatPHP(remaining)} to go</span>
                 </div>
               </div>
@@ -3502,6 +3504,7 @@ export default function DashboardPage() {
         {kidGoalsView}
       </section>
     ),
+    progress: kidGoalsView,
     transactions: kidTransactionsView,
     settings: kidSettingsView,
     profile: kidProfileView,
@@ -3514,6 +3517,7 @@ export default function DashboardPage() {
         {parentGoalsView}
       </section>
     ),
+    progress: parentGoalsView,
     transactions: parentTransactionsView,
     settings: parentSettingsView,
     profile: parentProfileView,
