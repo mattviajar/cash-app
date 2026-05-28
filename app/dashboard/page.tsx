@@ -2,6 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { Bar } from 'react-chartjs-2'
+import {
+  BarElement,
+  CategoryScale,
+  Chart as ChartJS,
+  Legend,
+  LinearScale,
+  Tooltip,
+  type ChartOptions,
+} from 'chart.js'
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
 type Role = 'kid' | 'parent'
 type MenuKey = 'dashboard' | 'transactions' | 'settings' | 'profile'
@@ -81,6 +93,13 @@ type DepositDebugState = {
   lastPollAt: string
 }
 
+type ProfileState = {
+  username: string
+  email: string
+  password: string
+  securityQuestion: string
+}
+
 const withdrawDenominations = [
   { field: 'bill1000', label: '1000 bill', value: 1000 },
   { field: 'bill500', label: '500 bill', value: 500 },
@@ -105,12 +124,12 @@ const menuItems: Array<{ key: MenuKey; label: string; icon: string }> = [
 const initialKidGoals: Goal[] = []
 
 const characterOptions = [
-  { id: 'astronaut', emoji: 'A', title: 'Space Saver' },
-  { id: 'wizard', emoji: 'W', title: 'Money Wizard' },
-  { id: 'ninja', emoji: 'N', title: 'Budget Ninja' },
-  { id: 'robot', emoji: 'R', title: 'Smart Saver Bot' },
-  { id: 'athlete', emoji: 'S', title: 'Goal Sprinter' },
-  { id: 'artist', emoji: 'C', title: 'Creative Planner' },
+  { id: 'astronaut', emoji: '🧑‍🚀', title: 'Space Saver' },
+  { id: 'wizard', emoji: '🧙', title: 'Money Wizard' },
+  { id: 'ninja', emoji: '🥷', title: 'Budget Ninja' },
+  { id: 'robot', emoji: '🤖', title: 'Smart Saver Bot' },
+  { id: 'athlete', emoji: '🏃', title: 'Goal Sprinter' },
+  { id: 'artist', emoji: '🧑‍🎨', title: 'Creative Planner' },
 ]
 
 const STORAGE_KEYS = {
@@ -135,6 +154,21 @@ const STORAGE_KEYS = {
 
 const defaultHistory: WithdrawalRecord[] = []
 const DEPOSIT_COUNTDOWN_SECONDS = 60
+
+function withComputedGoalSavings(goals: Goal[], availableBalance: number): Goal[] {
+  let remaining = Math.max(0, Number.isFinite(availableBalance) ? availableBalance : 0)
+
+  return goals.map((goal) => {
+    const target = Math.max(0, Number.isFinite(goal.target) ? goal.target : 0)
+    const saved = Math.min(remaining, target)
+    remaining = Math.max(0, remaining - saved)
+
+    return {
+      ...goal,
+      saved: Math.round(saved * 100) / 100,
+    }
+  })
+}
 
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
@@ -328,6 +362,14 @@ export default function DashboardPage() {
   const [kidName, setKidName] = useState('')
   const [parentName, setParentName] = useState('')
   const [parentBalance, setParentBalance] = useState(0)
+  const [profileState, setProfileState] = useState<ProfileState>({
+    username: '',
+    email: '',
+    password: '',
+    securityQuestion: '',
+  })
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMessage, setProfileMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [validKidAccounts, setValidKidAccounts] = useState<string[]>([])
   const [kidBalances, setKidBalances] = useState<{ [key: string]: number }>({})
   const [newKidUsername, setNewKidUsername] = useState('')
@@ -408,10 +450,14 @@ export default function DashboardPage() {
     }
   }
 
-  const kidGoals = useMemo(() => {
+  const kidGoalInputs = useMemo(() => {
     if (!kidName) return initialKidGoals
     return kidGoalsByAccount[kidName] ?? initialKidGoals
   }, [kidGoalsByAccount, kidName])
+
+  const kidGoals = useMemo(() => {
+    return withComputedGoalSavings(kidGoalInputs, balance)
+  }, [kidGoalInputs, balance])
 
   useEffect(() => {
     const hydrateSession = async () => {
@@ -566,6 +612,49 @@ export default function DashboardPage() {
     void hydrateSession()
 
   }, [router])
+
+  useEffect(() => {
+    if (!isHydrated) return
+
+    const username = role === 'kid' ? kidName : parentName
+    if (!username) return
+
+    let cancelled = false
+
+    const loadProfile = async () => {
+      try {
+        const res = await fetch('/api/auth/profile', { cache: 'no-store' })
+        if (!res.ok) {
+          return
+        }
+
+        const data = await res.json() as {
+          account?: {
+            username?: string
+            email?: string
+            securityQuestion?: string
+          }
+        }
+
+        if (cancelled || !data.account) return
+
+        setProfileState({
+          username: data.account.username ?? username,
+          email: data.account.email ?? '',
+          password: '',
+          securityQuestion: data.account.securityQuestion ?? '',
+        })
+      } catch {
+        // Keep the editor usable with whatever local values already exist.
+      }
+    }
+
+    void loadProfile()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isHydrated, role, kidName, parentName])
 
   useEffect(() => {
     if (!isHydrated) return
@@ -1297,13 +1386,57 @@ export default function DashboardPage() {
     (sum, entry) => sum + Math.abs(getSignedTransactionAmount(entry)),
     0
   )
-  const parentGoals = validKidAccounts.flatMap((username) =>
-    (kidGoalsByAccount[username] ?? []).map((goal) => ({
+  const parentGoals = validKidAccounts.flatMap((username) => {
+    const rawGoals = kidGoalsByAccount[username] ?? []
+    const computedGoals = withComputedGoalSavings(rawGoals, kidBalances[username] ?? 0)
+
+    return computedGoals.map((goal) => ({
       ...goal,
       child: username,
       key: `${username}-${goal.id}`,
     }))
-  )
+  })
+
+  const kidGoalChartData = useMemo(() => ({
+    labels: kidGoals.map((goal) => goal.name),
+    datasets: [
+      {
+        label: 'Saved',
+        data: kidGoals.map((goal) => Math.min(goal.saved, goal.target)),
+        backgroundColor: 'rgba(37, 99, 235, 0.75)',
+        borderRadius: 8,
+      },
+      {
+        label: 'Target',
+        data: kidGoals.map((goal) => goal.target),
+        backgroundColor: 'rgba(20, 184, 166, 0.35)',
+        borderRadius: 8,
+      },
+    ],
+  }), [kidGoals])
+
+  const kidGoalChartOptions = useMemo<ChartOptions<'bar'>>(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'top',
+      },
+      tooltip: {
+        callbacks: {
+          label: (ctx) => `${ctx.dataset.label}: ${formatPHP(Number(ctx.raw ?? 0))}`,
+        },
+      },
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        ticks: {
+          callback: (value) => formatPHP(Number(value)),
+        },
+      },
+    },
+  }), [])
   const currentUserName = (role === 'kid' ? kidName : parentName).trim().toLowerCase()
   const lockHeldByOtherUser =
     deviceLockStatus.active &&
@@ -1365,6 +1498,83 @@ export default function DashboardPage() {
   const resetWithdrawForm = () => {
     setWithdrawQuantity('1')
     setWithdrawNote('')
+  }
+
+  const saveProfile = async () => {
+    if (profileSaving) return
+
+    const username = profileState.username.trim().toLowerCase()
+    const email = profileState.email.trim().toLowerCase()
+    const password = profileState.password
+    const securityQuestion = profileState.securityQuestion.trim()
+
+    if (!username) {
+      setProfileMessage({ kind: 'err', text: 'Username is required.' })
+      return
+    }
+
+    if (!securityQuestion) {
+      setProfileMessage({ kind: 'err', text: 'Security question cannot be empty.' })
+      return
+    }
+
+    setProfileSaving(true)
+    setProfileMessage(null)
+
+    try {
+      const res = await fetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          email,
+          password,
+          securityQuestion,
+        }),
+      })
+
+      const data = await res.json().catch(() => ({ error: 'Failed to update profile' })) as {
+        ok?: boolean
+        error?: string
+        account?: {
+          username?: string
+          email?: string
+          securityQuestion?: string
+          role?: Role
+          parentUsername?: string
+        }
+      }
+
+      if (!res.ok || !data.ok || !data.account) {
+        setProfileMessage({ kind: 'err', text: data.error ?? 'Failed to update profile.' })
+        return
+      }
+
+      const nextUsername = data.account.username ?? username
+      const nextEmail = data.account.email ?? email
+      const nextSecurityQuestion = data.account.securityQuestion ?? securityQuestion
+
+      setProfileState((prev) => ({
+        ...prev,
+        username: nextUsername,
+        email: nextEmail,
+        password: '',
+        securityQuestion: nextSecurityQuestion,
+      }))
+
+      if ((data.account.role ?? role) === 'kid') {
+        setKidName(nextUsername)
+      } else {
+        setParentName(nextUsername)
+      }
+
+      sessionStorage.setItem('cash_username', nextUsername)
+      setProfileMessage({ kind: 'ok', text: 'Profile saved successfully.' })
+    } catch {
+      setProfileMessage({ kind: 'err', text: 'Network error while saving profile.' })
+    } finally {
+      setProfileSaving(false)
+    }
   }
 
   const handleWithdraw = async (e: React.FormEvent) => {
@@ -2231,22 +2441,13 @@ export default function DashboardPage() {
 
       <div className="glass-card">
         <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Goal Completion Graph</h4>
-        <div className="space-y-3">
-          {kidGoals.map((goal) => {
-            const percent = Math.min(100, Math.round((goal.saved / goal.target) * 100))
-            return (
-              <div key={goal.id}>
-                <div className="flex justify-between text-xs font-inter text-gray-700 mb-1">
-                  <span>{goal.name}</span>
-                  <span>{percent}%</span>
-                </div>
-                <div className="w-full h-4 bg-white/60 rounded-lg overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-blue-600 to-teal-500" style={{ width: `${percent}%` }}></div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
+        {kidGoals.length === 0 ? (
+          <p className="font-inter text-gray-700">Add at least one goal to show the graph.</p>
+        ) : (
+          <div className="h-72">
+            <Bar data={kidGoalChartData} options={kidGoalChartOptions} />
+          </div>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
@@ -2457,6 +2658,53 @@ export default function DashboardPage() {
               <p className="font-sora font-semibold text-blue-700 mt-1">{option.title}</p>
             </button>
           ))}
+        </div>
+      </div>
+
+      <div className="dashboard-panel">
+        <h4 className="text-xl font-sora font-bold text-blue-700 mb-3">Edit Profile</h4>
+        <div className="grid gap-3">
+          <input
+            type="text"
+            value={profileState.username}
+            onChange={(e) => setProfileState((prev) => ({ ...prev, username: e.target.value }))}
+            placeholder="Username"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="email"
+            value={profileState.email}
+            onChange={(e) => setProfileState((prev) => ({ ...prev, email: e.target.value }))}
+            placeholder="Gmail / Email"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="password"
+            value={profileState.password}
+            onChange={(e) => setProfileState((prev) => ({ ...prev, password: e.target.value }))}
+            placeholder="New Password (leave blank to keep current)"
+            className="dashboard-field w-full"
+          />
+          <input
+            type="text"
+            value={profileState.securityQuestion}
+            onChange={(e) => setProfileState((prev) => ({ ...prev, securityQuestion: e.target.value }))}
+            placeholder="Security Question"
+            className="dashboard-field w-full"
+          />
+          <button
+            type="button"
+            onClick={() => { void saveProfile() }}
+            disabled={profileSaving}
+            className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
+          >
+            {profileSaving ? 'Saving...' : 'Save Profile'}
+          </button>
+          {profileMessage && (
+            <p className={`text-sm font-inter ${profileMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+              {profileMessage.text}
+            </p>
+          )}
         </div>
       </div>
 
@@ -3194,9 +3442,52 @@ export default function DashboardPage() {
     <section className="dashboard-panel space-y-4">
       <h3 className="text-xl sm:text-2xl font-sora font-bold text-blue-700">Profile</h3>
       <div className="dashboard-list-item font-inter">
-        <p><span className="font-semibold">Name:</span> Parent Account</p>
+        <p><span className="font-semibold">Username:</span> {parentName || 'Parent Account'}</p>
         <p><span className="font-semibold">Role:</span> Parent</p>
         <p><span className="font-semibold">Permissions:</span> View balances, approve withdrawals, manage settings</p>
+      </div>
+      <div className="space-y-3">
+        <input
+          type="text"
+          value={profileState.username}
+          onChange={(e) => setProfileState((prev) => ({ ...prev, username: e.target.value }))}
+          placeholder="Username"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="email"
+          value={profileState.email}
+          onChange={(e) => setProfileState((prev) => ({ ...prev, email: e.target.value }))}
+          placeholder="Gmail / Email"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="password"
+          value={profileState.password}
+          onChange={(e) => setProfileState((prev) => ({ ...prev, password: e.target.value }))}
+          placeholder="New Password (leave blank to keep current)"
+          className="dashboard-field w-full"
+        />
+        <input
+          type="text"
+          value={profileState.securityQuestion}
+          onChange={(e) => setProfileState((prev) => ({ ...prev, securityQuestion: e.target.value }))}
+          placeholder="Security Question"
+          className="dashboard-field w-full"
+        />
+        <button
+          type="button"
+          onClick={() => { void saveProfile() }}
+          disabled={profileSaving}
+          className="dashboard-action-primary px-4 py-2 disabled:opacity-50"
+        >
+          {profileSaving ? 'Saving...' : 'Save Profile'}
+        </button>
+        {profileMessage && (
+          <p className={`text-sm font-inter ${profileMessage.kind === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+            {profileMessage.text}
+          </p>
+        )}
       </div>
     </section>
   )
