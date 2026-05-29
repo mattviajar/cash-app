@@ -2029,10 +2029,11 @@ export default function DashboardPage() {
     // Snapshot current max ID so only deposits AFTER this moment are counted.
     // Always reset cursor to a concrete value (including 0) to avoid stale
     // high-water marks blocking future detections.
-    parentLastSeenDepositIdRef.current = 0
-    parentLastSeenDepositEventIdRef.current = 0
     try {
       const res = await fetch('/api/deposit', { cache: 'no-store' })
+      if (!res.ok) {
+        throw new Error('Failed to snapshot current deposit state.')
+      }
       const data = await res.json() as { deposits: { id: number }[]; events?: { id: number }[] }
       const maxId = data.deposits?.length > 0 ? Math.max(...data.deposits.map((d) => d.id)) : 0
       const maxEventId = data.events && data.events.length > 0 ? Math.max(...data.events.map((e) => e.id)) : 0
@@ -2041,6 +2042,10 @@ export default function DashboardPage() {
     } catch {
       parentLastSeenDepositIdRef.current = 0
       parentLastSeenDepositEventIdRef.current = 0
+      void releaseDeviceLock(locker)
+      setPendingDepositError('Unable to start deposit session right now. Please try again.')
+      alert('Unable to start deposit session right now. Please try again.')
+      return
     }
 
     setPendingDepositKid(username)
@@ -2319,10 +2324,11 @@ export default function DashboardPage() {
       return
     }
 
-    kidLastSeenDepositIdRef.current = 0
-    kidLastSeenDepositEventIdRef.current = 0
     try {
       const res = await fetch('/api/deposit', { cache: 'no-store' })
+      if (!res.ok) {
+        throw new Error('Failed to snapshot current deposit state.')
+      }
       const data = await res.json() as { deposits: { id: number }[]; events?: { id: number }[] }
       kidLastSeenDepositIdRef.current = data.deposits?.length > 0
         ? Math.max(...data.deposits.map((d) => d.id))
@@ -2333,6 +2339,10 @@ export default function DashboardPage() {
     } catch {
       kidLastSeenDepositIdRef.current = 0
       kidLastSeenDepositEventIdRef.current = 0
+      void releaseDeviceLock(kidName)
+      setPendingDepositError('Unable to start deposit session right now. Please try again.')
+      alert('Unable to start deposit session right now. Please try again.')
+      return
     }
 
     setPendingDepositReceived(0)
