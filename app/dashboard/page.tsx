@@ -2188,6 +2188,21 @@ export default function DashboardPage() {
     })
   }
 
+  const removeGoal = (account: string, goalId: number) => {
+    setKidGoalsByAccount((prev) => {
+      const goals = prev[account] ?? []
+      const nextGoals = goals.filter((goal) => goal.id !== goalId)
+      if (nextGoals.length === goals.length) {
+        return prev
+      }
+
+      return {
+        ...prev,
+        [account]: nextGoals,
+      }
+    })
+  }
+
   const requestGoalWithdrawal = async (goal: Goal) => {
     if (!kidName) return
 
@@ -2587,6 +2602,13 @@ export default function DashboardPage() {
                       className="dashboard-action-secondary px-3 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {goal.completed ? 'Completed' : 'Withdraw'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeGoal(kidName, goal.id)}
+                      className="dashboard-action-soft px-3 py-1 rounded-lg text-red-700"
+                    >
+                      Remove
                     </button>
                   </div>
                 </div>
@@ -3176,6 +3198,13 @@ export default function DashboardPage() {
                       className="dashboard-action-secondary px-3 py-1 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {goal.completed ? 'Completed' : parentWithdrawBusy ? 'Processing...' : 'Withdraw'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeGoal(parentName, goal.id)}
+                      className="dashboard-action-soft px-3 py-1 rounded-lg text-red-700"
+                    >
+                      Remove
                     </button>
                   </div>
                 </div>
