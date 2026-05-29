@@ -332,8 +332,6 @@ export default function DashboardPage() {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('dashboard')
   const [kidQuickSection, setKidQuickSection] = useState<KidQuickSection>('none')
   const [parentQuickSection, setParentQuickSection] = useState<ParentQuickSection>('none')
-  const [showKidMoreActions, setShowKidMoreActions] = useState(false)
-  const [showParentMoreActions, setShowParentMoreActions] = useState(false)
   const [balance, setBalance] = useState(0)
   const [withdrawNote, setWithdrawNote] = useState('')
   const [withdrawDenomination, setWithdrawDenomination] = useState<WithdrawDenominationKey>('bill100')
@@ -2378,44 +2376,7 @@ export default function DashboardPage() {
           <span className="sm:hidden text-lg">💸</span>
           <span className="hidden sm:inline">Withdraw</span>
         </button>
-        <button
-          type="button"
-          onClick={() => setShowKidMoreActions((prev) => !prev)}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">⋯</span>
-          <span className="hidden sm:inline">{showKidMoreActions ? 'Less' : 'More'}</span>
-        </button>
       </div>
-
-      {showKidMoreActions && (
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        <button
-          type="button"
-          onClick={() => setKidQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">🧾</span>
-          <span className="hidden sm:inline">Activity</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMenu('profile')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">👤</span>
-          <span className="hidden sm:inline">Profile</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMenu('settings')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">⚙️</span>
-          <span className="hidden sm:inline">Settings</span>
-        </button>
-      </div>
-      )}
 
       {kidQuickSection === 'withdraw' && (
       <div className="dashboard-panel">
@@ -2459,17 +2420,6 @@ export default function DashboardPage() {
             {instantWithdrawals ? `Withdraw ${formatPHP(selectedWithdrawAmount)}` : `Request ${formatPHP(selectedWithdrawAmount)}`}
           </button>
         </form>
-        <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs font-inter text-gray-700">
-          {withdrawDenominations.map((option) => {
-            const count = machineInventory?.[option.field] ?? 0
-            return (
-              <div key={option.field} className="dashboard-list-item px-3 py-2">
-                <p className="font-semibold text-gray-800">{option.label}</p>
-                <p>{inventoryLoading ? 'Loading inventory...' : `${count} available`}</p>
-              </div>
-            )
-          })}
-        </div>
         <p className="text-sm text-gray-600 font-inter mt-2">
           Selected payout: <span className="font-semibold text-blue-700">{formatPHP(selectedWithdrawAmount)}</span>
         </p>
@@ -2931,44 +2881,7 @@ export default function DashboardPage() {
           <span className="sm:hidden text-lg">💸</span>
           <span className="hidden sm:inline">Withdraw</span>
         </button>
-        <button
-          type="button"
-          onClick={() => setShowParentMoreActions((prev) => !prev)}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">⋯</span>
-          <span className="hidden sm:inline">{showParentMoreActions ? 'Less' : 'More'}</span>
-        </button>
       </div>
-
-      {showParentMoreActions && (
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        <button
-          type="button"
-          onClick={() => setParentQuickSection((prev) => prev === 'activity' ? 'none' : 'activity')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">🧾</span>
-          <span className="hidden sm:inline">Activity</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMenu('settings')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">⚙️</span>
-          <span className="hidden sm:inline">Settings</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveMenu('profile')}
-          className="dashboard-action-soft"
-        >
-          <span className="sm:hidden text-lg">👤</span>
-          <span className="hidden sm:inline">Profile</span>
-        </button>
-      </div>
-      )}
 
       {parentQuickSection === 'deposit' && (
       <div className="dashboard-panel">
