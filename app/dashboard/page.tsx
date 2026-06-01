@@ -338,7 +338,6 @@ export default function DashboardPage() {
   const [withdrawQuantity, setWithdrawQuantity] = useState('1')
   const [kidWithdrawBusy, setKidWithdrawBusy] = useState(false)
   const [machineInventory, setMachineInventory] = useState<MachineInventory | null>(null)
-  const [machineInventoryTotalValue, setMachineInventoryTotalValue] = useState(0)
   const [inventoryLoading, setInventoryLoading] = useState(true)
   const [instantWithdrawals, setInstantWithdrawals] = useState(false)
   const [pendingWithdrawals, setPendingWithdrawals] = useState<PendingWithdrawal[]>([])
@@ -444,7 +443,6 @@ export default function DashboardPage() {
       }
       const data = await res.json() as InventoryResponse
       setMachineInventory(data.inventory ?? null)
-      setMachineInventoryTotalValue(Math.round(Number(data.totalValue ?? 0) * 100) / 100)
     } catch {
       // Keep current inventory view if polling momentarily fails.
     }
@@ -927,7 +925,6 @@ export default function DashboardPage() {
       } catch {
         if (!cancelled) {
           setMachineInventory(null)
-          setMachineInventoryTotalValue(0)
         }
       } finally {
         if (!cancelled) {
@@ -1370,16 +1367,15 @@ export default function DashboardPage() {
   const selectedWithdrawCount = Math.max(1, Number.isFinite(Number(withdrawQuantity)) ? Math.round(Number(withdrawQuantity)) : 1)
   const selectedWithdrawAmount = selectedWithdrawDenomination.value * selectedWithdrawCount
   const selectedWithdrawInventoryCount = machineInventory?.[selectedWithdrawDenomination.field] ?? 0
-  const machineCashStock = withdrawDenominations.map((option) => ({
-    field: option.field,
-    label: option.label,
-    count: machineInventory?.[option.field] ?? 0,
-  }))
   const selectedChildBalance = useMemo(() => {
     if (!parentChildWithdrawKid) return 0
     return kidBalances[parentChildWithdrawKid] ?? parentChildren.find((child) => child.name === parentChildWithdrawKid)?.balance ?? 0
   }, [kidBalances, parentChildWithdrawKid, parentChildren])
-  const canWithdrawBySelection = selectedWithdrawAmount > 0 && selectedWithdrawInventoryCount >= selectedWithdrawCount
+  const canWithdrawBySelection = selectedWithdrawAmount > 0 && (
+    role === 'kid'
+      ? selectedWithdrawInventoryCount > 0
+      : selectedWithdrawInventoryCount >= selectedWithdrawCount
+  )
   const canParentChildWithdraw = !!parentChildWithdrawKid && canWithdrawBySelection && selectedWithdrawAmount <= selectedChildBalance
   const parentSpendingByChild = parentChildren.map((child) => ({
     name: child.name,
@@ -2399,9 +2395,14 @@ export default function DashboardPage() {
           >
             {withdrawDenominations.map((option) => {
               const count = machineInventory?.[option.field] ?? 0
+              const availability = inventoryLoading
+                ? 'loading...'
+                : count > 0
+                  ? 'available'
+                  : 'unavailable'
               return (
                 <option key={option.field} value={option.field}>
-                  {option.label} • {inventoryLoading ? 'loading...' : `${count} in stock`}
+                  {option.label} • {availability}
                 </option>
               )
             })}
@@ -2433,26 +2434,9 @@ export default function DashboardPage() {
         <p className="text-sm text-gray-600 font-inter mt-2">
           Selected payout: <span className="font-semibold text-blue-700">{formatPHP(selectedWithdrawAmount)}</span>
         </p>
-        <div className="mt-4 rounded-2xl border border-white/80 bg-white/72 p-4 shadow-sm">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div>
-              <h4 className="text-lg font-sora font-bold text-blue-700">Cash Stock</h4>
-              <p className="text-xs text-gray-600 font-inter">What is currently loaded in the machine</p>
-            </div>
-            <div className="rounded-xl bg-white/80 px-4 py-2 border border-white shadow-sm">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-blue-600 font-inter font-semibold">Total value</p>
-              <p className="text-xl font-sora font-black text-blue-700">{formatPHP(machineInventoryTotalValue)}</p>
-            </div>
-          </div>
-          <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {machineCashStock.map((item) => (
-              <div key={item.field} className="dashboard-list-item">
-                <p className="text-sm font-semibold text-gray-800">{item.label}</p>
-                <p className="text-xs text-gray-600 font-inter">{inventoryLoading ? 'Loading...' : `${item.count} in stock`}</p>
-              </div>
-            ))}
-          </div>
-        </div>
+        <p className="text-xs text-gray-600 font-inter mt-2">
+          Machine cash inventory amounts are hidden on kid accounts.
+        </p>
         {!instantWithdrawals && (
           <p className="text-sm text-amber-700 font-inter mt-2">Parent approval is required before this withdrawal is processed.</p>
         )}
