@@ -2394,15 +2394,9 @@ export default function DashboardPage() {
             className="dashboard-field"
           >
             {withdrawDenominations.map((option) => {
-              const count = machineInventory?.[option.field] ?? 0
-              const availability = inventoryLoading
-                ? 'loading...'
-                : count > 0
-                  ? 'available'
-                  : 'unavailable'
               return (
                 <option key={option.field} value={option.field}>
-                  {option.label} • {availability}
+                  {option.label}
                 </option>
               )
             })}
