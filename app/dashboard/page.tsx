@@ -339,7 +339,7 @@ export default function DashboardPage() {
   const [kidWithdrawBusy, setKidWithdrawBusy] = useState(false)
   const [machineInventory, setMachineInventory] = useState<MachineInventory | null>(null)
   const [inventoryLoading, setInventoryLoading] = useState(true)
-  const [instantWithdrawals, setInstantWithdrawals] = useState(false)
+  const [instantWithdrawals, setInstantWithdrawals] = useState(true)
   const [pendingWithdrawals, setPendingWithdrawals] = useState<PendingWithdrawal[]>([])
   const [history, setHistory] = useState<WithdrawalRecord[]>(defaultHistory)
   const [kidGoalsByAccount, setKidGoalsByAccount] = useState<Record<string, Goal[]>>({})
@@ -514,7 +514,8 @@ export default function DashboardPage() {
 
       setKidGoalsByAccount(loadedGoalsByAccount)
 
-      setInstantWithdrawals(localStorage.getItem(STORAGE_KEYS.instant) === 'true')
+      const storedInstantWithdrawals = localStorage.getItem(STORAGE_KEYS.instant)
+      setInstantWithdrawals(storedInstantWithdrawals === null ? true : storedInstantWithdrawals === 'true')
 
       const storedNotifications = localStorage.getItem(STORAGE_KEYS.kidNotifications)
       if (storedNotifications) {

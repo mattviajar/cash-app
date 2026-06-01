@@ -49,7 +49,7 @@ model Goal {
 model ParentSettings {
   id                 String  @id @default(cuid())
   accountId          String  @unique
-  instantWithdrawals Boolean @default(false)
+  instantWithdrawals Boolean @default(true)
   autoApproveLimit   Float   @default(0)
   spendingAlerts     Boolean @default(true)
   account            Account @relation(fields: [accountId], references: [id])
