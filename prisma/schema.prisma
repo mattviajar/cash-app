@@ -51,7 +51,6 @@ model ParentSettings {
   accountId          String  @unique
   instantWithdrawals Boolean @default(true)
   autoApproveLimit   Float   @default(0)
-  spendingAlerts     Boolean @default(true)
   account            Account @relation(fields: [accountId], references: [id])
 }
 

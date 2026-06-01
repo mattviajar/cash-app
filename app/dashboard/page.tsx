@@ -135,7 +135,6 @@ const STORAGE_KEYS = {
   kidNotifications: 'cash_kid_notifications',
   kidShowBalance: 'cash_kid_show_balance',
   kidRequireNote: 'cash_kid_require_note',
-  parentAlerts: 'cash_parent_spending_alerts',
   parentAutoApproveLimit: 'cash_parent_auto_approve_limit',
   kidGoals: 'cash_kid_goals',
   kidGoalsByAccount: 'cash_kid_goals_by_account',
@@ -346,7 +345,6 @@ export default function DashboardPage() {
   const [kidNotifications, setKidNotifications] = useState(true)
   const [kidShowBalance, setKidShowBalance] = useState(true)
   const [kidRequireNote, setKidRequireNote] = useState(false)
-  const [parentSpendingAlerts, setParentSpendingAlerts] = useState(true)
   const [parentAutoApproveLimit, setParentAutoApproveLimit] = useState(0)
   // Device WiFi configuration (sent to ESP32 via SETWIFI command queue)
   const [wifiSsid, setWifiSsid] = useState('')
@@ -532,11 +530,6 @@ export default function DashboardPage() {
         setKidRequireNote(storedRequireNote === 'true')
       }
 
-      const storedParentAlerts = localStorage.getItem(STORAGE_KEYS.parentAlerts)
-      if (storedParentAlerts) {
-        setParentSpendingAlerts(storedParentAlerts === 'true')
-      }
-
       const storedAutoApproveLimit = localStorage.getItem(STORAGE_KEYS.parentAutoApproveLimit)
       if (storedAutoApproveLimit) {
         const parsedLimit = Number(storedAutoApproveLimit)
@@ -670,7 +663,6 @@ export default function DashboardPage() {
     localStorage.setItem(STORAGE_KEYS.kidNotifications, String(kidNotifications))
     localStorage.setItem(STORAGE_KEYS.kidShowBalance, String(kidShowBalance))
     localStorage.setItem(STORAGE_KEYS.kidRequireNote, String(kidRequireNote))
-    localStorage.setItem(STORAGE_KEYS.parentAlerts, String(parentSpendingAlerts))
     localStorage.setItem(STORAGE_KEYS.parentAutoApproveLimit, String(parentAutoApproveLimit))
     localStorage.setItem(STORAGE_KEYS.kidGoalsByAccount, JSON.stringify(kidGoalsByAccount))
     localStorage.setItem(STORAGE_KEYS.kidCharacter, kidCharacter)
@@ -680,7 +672,6 @@ export default function DashboardPage() {
     kidNotifications,
     kidShowBalance,
     kidRequireNote,
-    parentSpendingAlerts,
     parentAutoApproveLimit,
     kidGoalsByAccount,
     kidCharacter,
@@ -1423,18 +1414,6 @@ export default function DashboardPage() {
   }, [balance, canWithdrawBySelection, inventoryLoading, kidRequireNote, selectedWithdrawAmount, withdrawNote])
 
   const canParentWithdraw = selectedWithdrawAmount > 0 && selectedWithdrawAmount <= parentBalance && canWithdrawBySelection && !inventoryLoading
-
-  const parentAlerts = [
-    instantWithdrawals
-      ? 'Instant withdrawals are ON for kids.'
-      : `Pending approvals: ${parentPending.length}`,
-    parentSpendingAlerts
-      ? 'Spending alerts are enabled.'
-      : 'Spending alerts are disabled.',
-    topGoal && topGoal.saved / topGoal.target > 0.7
-      ? `${kidName} is close to a savings goal.`
-      : 'No new goal alerts today.',
-  ]
 
   const startWithdrawProgress = (actor: 'kid' | 'parent', amount: number) => {
     withdrawStartedAtRef.current = Date.now()
@@ -3290,7 +3269,6 @@ export default function DashboardPage() {
           <div className="space-y-2 font-inter text-gray-700">
             <p>• Instant withdrawals: <span className="font-semibold">{instantWithdrawals ? 'Enabled' : 'Disabled'}</span></p>
             <p>• Auto-approve limit: <span className="font-semibold">{formatPHP(parentAutoApproveLimit)}</span></p>
-            <p>• Spending alerts: <span className="font-semibold">{parentSpendingAlerts ? 'On' : 'Off'}</span></p>
           </div>
         </div>
 
@@ -3404,24 +3382,6 @@ export default function DashboardPage() {
             }`}
           >
             {instantWithdrawals ? 'Enabled' : 'Disabled'}
-          </button>
-        </div>
-
-        <div className="dashboard-list-item flex items-center justify-between gap-4">
-          <div>
-            <p className="font-inter font-semibold text-gray-800">Spending alerts</p>
-            <p className="text-sm text-gray-600 font-inter">Show alerts for kid withdrawal activity and thresholds.</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setParentSpendingAlerts((prev) => !prev)}
-            className={`px-4 py-2 rounded-lg font-sora font-semibold transition-all ${
-              parentSpendingAlerts
-                ? 'bg-gradient-to-r from-blue-600 via-sky-500 to-cyan-400 text-white shadow-md'
-                : 'bg-white text-gray-700 border border-gray-300 shadow-sm'
-            }`}
-          >
-            {parentSpendingAlerts ? 'On' : 'Off'}
           </button>
         </div>
 
